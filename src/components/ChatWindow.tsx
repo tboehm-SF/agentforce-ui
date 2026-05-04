@@ -28,7 +28,7 @@ function MessageBubble({ role, content, isStreaming }: { role: 'user' | 'agent';
   );
 }
 
-export function ChatWindow({ agent, config }: ChatWindowProps) {
+export function ChatWindow({ agent }: ChatWindowProps) {
   const [input, setInput] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
