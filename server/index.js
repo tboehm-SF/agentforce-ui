@@ -168,6 +168,69 @@ app.post('/api/auth/logout', (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
+// ─── Segments API ─────────────────────────────────────────────────────────────
+
+app.get('/api/segments', async (req, res) => {
+  if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
+  const { accessToken, instanceUrl } = req.session.auth;
+  try {
+    const page     = parseInt(req.query.page  || '0', 10);
+    const pageSize = parseInt(req.query.pageSize || '25', 10);
+    const url = `${instanceUrl}/services/data/${SF_API_VERSION}/ssot/segments?offset=${page * pageSize}&batchSize=${pageSize}`;
+    const sfRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!sfRes.ok) { const e = await sfRes.text(); return res.status(sfRes.status).json({ error: e }); }
+    const data = await sfRes.json();
+    res.json({ segments: data.segments ?? [], totalSize: data.totalSize ?? data.count ?? 0 });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/segments/:id', async (req, res) => {
+  if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
+  const { accessToken, instanceUrl } = req.session.auth;
+  try {
+    const sfRes = await fetch(
+      `${instanceUrl}/services/data/${SF_API_VERSION}/ssot/segments/${req.params.id}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!sfRes.ok) { const e = await sfRes.text(); return res.status(sfRes.status).json({ error: e }); }
+    res.json(await sfRes.json());
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Campaigns API (via BotDefinition agent query) ────────────────────────────
+// Returns the list of marketing-category agents to act as the "campaigns" entry point
+
+app.get('/api/campaigns/agents', async (req, res) => {
+  if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
+  const { accessToken, instanceUrl } = req.session.auth;
+  try {
+    // Return the marketing-relevant agents for the campaigns workspace
+    const q = "SELECT Id, DeveloperName, MasterLabel FROM BotDefinition WHERE DeveloperName IN ('Campaign_Performance_Agent','Marketing_NBA_Campaign_Agent','Paid_Media_Optimization_Agent','Marketing_Studio_Agent','Analytics_and_Visualization') ORDER BY MasterLabel";
+    const url = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(q)}`;
+    const sfRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!sfRes.ok) { const e = await sfRes.text(); return res.status(sfRes.status).json({ error: e }); }
+    const data = await sfRes.json();
+    res.json({ agents: data.records ?? [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Content API (Salesforce CMS) ─────────────────────────────────────────────
+
+app.get('/api/content', async (req, res) => {
+  if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
+  const { accessToken, instanceUrl } = req.session.auth;
+  try {
+    const type = req.query.type || '';
+    const page = parseInt(req.query.page || '0', 10);
+    const pageSize = parseInt(req.query.pageSize || '20', 10);
+    let url = `${instanceUrl}/services/data/v62.0/connect/cms/contents?page=${page}&pageSize=${pageSize}`;
+    if (type) url += `&managedContentType=${encodeURIComponent(type)}`;
+    const sfRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!sfRes.ok) { const e = await sfRes.text(); return res.status(sfRes.status).json({ error: e }); }
+    res.json(await sfRes.json());
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ─── Chat API ─────────────────────────────────────────────────────────────────
 // Uses the Agent Runtime API v1 — completely separate from the REST data API.
 // Endpoint base: api_instance_url from the token response (not My Domain URL).

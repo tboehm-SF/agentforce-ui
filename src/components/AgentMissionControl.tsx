@@ -7,6 +7,7 @@ interface Props {
   agents:        Agent[];
   auth:          AuthState | null;
   onLogout:      () => void;
+  onBack?:       () => void;
 }
 
 const CATEGORY_COLORS: Record<string, { accent: string; bg: string; glow: string }> = {
@@ -17,7 +18,7 @@ const CATEGORY_COLORS: Record<string, { accent: string; bg: string; glow: string
   Other:       { accent: '#706e6b', bg: 'rgba(112,110,107,0.12)', glow: 'rgba(112,110,107,0.2)' },
 };
 
-export function AgentMissionControl({ activeAgent, onSelectAgent, agents, auth, onLogout }: Props) {
+export function AgentMissionControl({ activeAgent, onSelectAgent, agents, auth, onLogout, onBack }: Props) {
   const [activeCategory, setActiveCategory] = useState<string>('All');
   const [search, setSearch] = useState('');
 
@@ -43,6 +44,13 @@ export function AgentMissionControl({ activeAgent, onSelectAgent, agents, auth, 
       <header className="relative px-6 pt-7 pb-4 shrink-0">
         <div className="flex items-center justify-between mb-5">
           <div className="flex items-center gap-3">
+            {onBack && (
+              <button onClick={onBack}
+                className="w-8 h-8 rounded-lg flex items-center justify-center text-white/40 hover:text-white/80 transition-colors hover:bg-white/5 shrink-0"
+                title="Back to mode selector">
+                ←
+              </button>
+            )}
             <div className="relative w-9 h-9">
               <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-[#1b96ff] to-[#9050e9] flex items-center justify-center text-base glow-blue">
                 ⚡

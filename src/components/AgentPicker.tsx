@@ -8,6 +8,7 @@ interface Props {
   auth: AuthState;
   onConfirm: (selected: Agent[]) => void;
   onLogout:  () => void;
+  onBack?:   () => void;
 }
 
 const CATEGORY_COLORS: Record<string, { accent: string; bg: string; glow: string }> = {
@@ -33,7 +34,7 @@ function enrichAgent(raw: { Id: string; DeveloperName: string; MasterLabel: stri
   };
 }
 
-export function AgentPicker({ auth, onConfirm, onLogout }: Props) {
+export function AgentPicker({ auth, onConfirm, onLogout, onBack }: Props) {
   const [agents,   setAgents]   = useState<Agent[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading,  setLoading]  = useState(true);
@@ -94,6 +95,13 @@ export function AgentPicker({ auth, onConfirm, onLogout }: Props) {
         {/* ── Header ─────────────────────────────── */}
         <div className="flex items-center justify-between mb-8 shrink-0">
           <div className="flex items-center gap-3">
+            {onBack && (
+              <button onClick={onBack}
+                className="w-8 h-8 rounded-lg flex items-center justify-center text-white/40 hover:text-white/80 transition-colors hover:bg-white/5 shrink-0"
+                title="Back to mode selector">
+                ←
+              </button>
+            )}
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-[#1b96ff] to-[#9050e9] flex items-center justify-center text-base glow-blue">
               ⚡
             </div>

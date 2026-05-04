@@ -41,5 +41,28 @@ export interface AuthState {
   orgName?: string;
 }
 
-/** App phase — drives the 3-step onboarding */
-export type AppPhase = 'login' | 'agent-picker' | 'mission-control';
+/** App phase — drives the multi-step onboarding and workspace routing */
+export type AppPhase =
+  | 'login'
+  | 'mode-selector'    // NEW: pick what to work with
+  | 'agent-picker'     // existing: choose agents (reached via Agents mode)
+  | 'mission-control'  // existing: agent workspace
+  | 'segments'         // NEW: Data Cloud segments workspace
+  | 'campaigns'        // NEW: campaigns workspace (via marketing agent)
+  | 'content';         // NEW: content query workspace
+
+/** Mode picked by user at the mode-selector screen */
+export type WorkspaceMode = 'agents' | 'segments' | 'campaigns' | 'content';
+
+/** A Data Cloud segment record */
+export interface Segment {
+  marketSegmentId: string;
+  apiName: string;
+  displayName: string;
+  description?: string;
+  segmentStatus: string;   // 'ACTIVE' | 'INACTIVE' | 'DRAFT'
+  publishStatus?: string;  // 'PUBLISHED' | 'UNPUBLISHED'
+  segmentType?: string;
+  dataSpace?: string;
+  nextPublishDateTime?: string;
+}
