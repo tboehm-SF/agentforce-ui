@@ -10,7 +10,7 @@ import {
  * Stateful chat hook — always routes through the Express server proxy.
  * The server holds SF credentials; no auth needed client-side.
  */
-export function useAgentChat({ agentApiName }: { agentApiName: string }) {
+export function useAgentChat({ agentApiName }: { agentApiName: string; }) {
   const [messages,     setMessages]     = useState<Message[]>([]);
   const [isLoading,    setIsLoading]    = useState(false);
   const [isStreaming,  setIsStreaming]  = useState(false);

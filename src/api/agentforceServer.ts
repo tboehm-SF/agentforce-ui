@@ -11,9 +11,10 @@ import type { Session } from '../types';
 
 /**
  * Ask the server to create a new agent session.
+ * @param agentId  18-char BotDefinition record ID (e.g. 0Xxg7000000C2KbCAK)
  */
-export async function createServerSession(agentDeveloperName: string): Promise<Session> {
-  const res = await fetch(`/api/agents/${agentDeveloperName}/sessions`, {
+export async function createServerSession(agentId: string): Promise<Session> {
+  const res = await fetch(`/api/agents/${agentId}/sessions`, {
     method: 'POST',
   });
   if (!res.ok) {
@@ -21,7 +22,7 @@ export async function createServerSession(agentDeveloperName: string): Promise<S
     throw new Error(`Failed to create session: ${res.status} — ${err}`);
   }
   const data = await res.json();
-  return { sessionId: data.sessionId, agentId: agentDeveloperName };
+  return { sessionId: data.sessionId, agentId };
 }
 
 /**
@@ -65,25 +66,31 @@ export async function sendServerMessageStreaming(
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
+      // SSE events are separated by double newlines; split on blank lines
+      const events = buffer.split(/\n\n/);
+      buffer = events.pop() ?? '';
 
-      for (const line of lines) {
-        if (!line.startsWith('data:')) continue;
-        const raw = line.slice(5).trim();
+      for (const eventBlock of events) {
+        // Each event block has lines: "event: Type", "id: ...", "data: {...}"
+        const dataLine = eventBlock.split('\n').find(l => l.startsWith('data:'));
+        if (!dataLine) continue;
+        const raw = dataLine.slice(5).trim();
         if (!raw || raw === '[DONE]') continue;
 
         try {
-          const event = JSON.parse(raw);
-          const text =
-            event?.data?.message?.content?.[0]?.text ??
-            event?.message?.content?.[0]?.text        ??
-            event?.text                               ??
-            '';
-          if (text) {
-            fullText += text;
-            onChunk(text);
+          const evt = JSON.parse(raw);
+          const type = evt?.type;
+
+          if (type === 'TextChunk') {
+            // Incremental text chunk during streaming
+            const chunk = evt?.message?.text ?? evt?.text ?? '';
+            if (chunk) { fullText += chunk; onChunk(chunk); }
+          } else if (type === 'Inform') {
+            // Complete assembled message — use as final text if streaming produced nothing
+            const text = evt?.message?.message ?? evt?.message?.text ?? '';
+            if (text && !fullText) { fullText = text; onChunk(text); }
           }
+          // ProgressIndicator and EndOfTurn are informational — no text to display
         } catch {
           // Non-JSON keepalive lines — skip
         }

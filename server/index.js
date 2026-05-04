@@ -54,7 +54,7 @@ app.get('/auth/login', (req, res) => {
     response_type:          'code',
     client_id:              SF_CLIENT_ID,
     redirect_uri:           redirectUri,
-    scope:                  'api',
+    scope:                  'api chatbot_api',
     code_challenge:         codeChallenge,
     code_challenge_method:  'S256',
   });
@@ -114,11 +114,13 @@ app.get('/auth/callback', async (req, res) => {
     const identity = idRes.ok ? await idRes.json() : {};
 
     // Store everything in the server-side session (tokens never reach the browser)
+    // api_instance_url is the correct base for the Agentforce Agent Runtime API
     req.session.auth = {
-      accessToken:  tokenData.access_token,
-      instanceUrl:  tokenData.instance_url || SF_BASE_URL,
-      username:     identity.preferred_username || identity.email || '',
-      displayName:  identity.name || '',
+      accessToken:    tokenData.access_token,
+      instanceUrl:    tokenData.instance_url || SF_BASE_URL,
+      apiInstanceUrl: tokenData.api_instance_url || tokenData.instance_url || SF_BASE_URL,
+      username:       identity.preferred_username || identity.email || '',
+      displayName:    identity.name || '',
     };
 
     // Send user to the React app — no tokens in the URL
@@ -136,7 +138,7 @@ app.get('/api/auth/me', (req, res) => {
   res.json({ authenticated: true, username, displayName, instanceUrl });
 });
 
-// Step 4: Fetch org agents using the session token
+// Step 4: Fetch org agents using the session token — include Id (record ID needed for Agent API)
 app.get('/api/auth/agents', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
 
@@ -166,24 +168,28 @@ app.post('/api/auth/logout', (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
-// ─── Chat API (uses the logged-in user's session token — no separate credentials needed) ──
+// ─── Chat API ─────────────────────────────────────────────────────────────────
+// Uses the Agent Runtime API v1 — completely separate from the REST data API.
+// Endpoint base: api_instance_url from the token response (not My Domain URL).
+// Agent identifier: 18-char BotDefinition record ID (e.g. 0Xxg...), not developerName.
 const sessionAgentMap = new Map();
 
-/** Get the instance URL for this session — may differ per user's org */
-const sfAgentBase = (instanceUrl, agentName) =>
-  `${instanceUrl}/services/data/${SF_API_VERSION}/einstein/ai-agent/agents/${agentName}`;
+// Agent Runtime API v1 — correct path structure confirmed from SF docs
+const agentApiBase = (apiInstanceUrl, agentId) =>
+  `${apiInstanceUrl}/einstein/ai-agent/v1/agents/${agentId}`;
 
-app.post('/api/agents/:developerName/sessions', async (req, res) => {
+app.post('/api/agents/:agentId/sessions', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
-  const { developerName } = req.params;
-  const { accessToken, instanceUrl } = req.session.auth;
+  const { agentId } = req.params;
+  const { accessToken, instanceUrl, apiInstanceUrl } = req.session.auth;
   try {
-    const sfRes = await fetch(`${sfAgentBase(instanceUrl, developerName)}/sessions`, {
+    const sfRes = await fetch(`${agentApiBase(apiInstanceUrl, agentId)}/sessions`, {
       method:  'POST',
       headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         externalSessionKey:    crypto.randomUUID(),
         instanceConfig:        { endpoint: instanceUrl },
+        featureSupport:        'Streaming',
         streamingCapabilities: { chunkTypes: ['Text'] },
         bypassUser:            true,
       }),
@@ -191,11 +197,12 @@ app.post('/api/agents/:developerName/sessions', async (req, res) => {
 
     if (!sfRes.ok) {
       const err = await sfRes.text();
+      console.error('[create session] SF error:', sfRes.status, err);
       return res.status(sfRes.status).json({ error: err });
     }
 
     const data = await sfRes.json();
-    sessionAgentMap.set(data.sessionId, { developerName, instanceUrl, accessToken });
+    sessionAgentMap.set(data.sessionId, { agentId, apiInstanceUrl, instanceUrl, accessToken, sequenceId: 0 });
     res.json({ sessionId: data.sessionId });
   } catch (e) {
     console.error('[create session]', e.message);
@@ -209,10 +216,13 @@ app.post('/api/sessions/:id/messages', async (req, res) => {
   const { message } = req.body;
   const sessionInfo = sessionAgentMap.get(id);
   if (!sessionInfo) return res.status(404).json({ error: 'Session not found' });
-  const { developerName: agentName, instanceUrl, accessToken } = sessionInfo;
+
+  // sequenceId must increment with each message in the session
+  sessionInfo.sequenceId += 1;
+  const { agentId, apiInstanceUrl, accessToken, sequenceId } = sessionInfo;
 
   try {
-    const sfRes  = await fetch(`${sfAgentBase(instanceUrl, agentName)}/sessions/${id}/messages`, {
+    const sfRes = await fetch(`${agentApiBase(apiInstanceUrl, agentId)}/sessions/${id}/messages/stream`, {
       method:  'POST',
       headers: {
         Authorization:  `Bearer ${accessToken}`,
@@ -220,13 +230,14 @@ app.post('/api/sessions/:id/messages', async (req, res) => {
         Accept:         'text/event-stream',
       },
       body: JSON.stringify({
-        message:   { role: 'user', content: [{ type: 'text', text: message }] },
+        message: { sequenceId, type: 'Text', text: message },
         variables: [],
       }),
     });
 
     if (!sfRes.ok) {
       const err = await sfRes.text();
+      console.error('[send message] SF error:', sfRes.status, err);
       return res.status(sfRes.status).json({ error: err });
     }
 
@@ -254,10 +265,11 @@ app.delete('/api/sessions/:id', async (req, res) => {
   const { id }      = req.params;
   const sessionInfo = sessionAgentMap.get(id);
   if (!sessionInfo) return res.json({ ok: true });
-  const { developerName: agentName, instanceUrl, accessToken } = sessionInfo;
+  const { agentId, apiInstanceUrl, accessToken } = sessionInfo;
   try {
-    await fetch(`${sfAgentBase(instanceUrl, agentName)}/sessions/${id}`, {
-      method: 'DELETE', headers: { Authorization: `Bearer ${accessToken}` },
+    await fetch(`${agentApiBase(apiInstanceUrl, agentId)}/sessions/${id}`, {
+      method:  'DELETE',
+      headers: { Authorization: `Bearer ${accessToken}`, 'x-session-end-reason': 'UserRequest' },
     });
     sessionAgentMap.delete(id);
     res.json({ ok: true });

@@ -23,7 +23,7 @@ export function AgentChatPanel({ agent, onClose }: Props) {
   const {
     messages, sendMessage, clearChat,
     isLoading, isStreaming, streamingText, error,
-  } = useAgentChat({ agentApiName: agent.developerName });
+  } = useAgentChat({ agentApiName: agent.id }); // agent.id = 18-char BotDefinition record ID
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
