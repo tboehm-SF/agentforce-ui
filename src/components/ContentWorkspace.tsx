@@ -1,5 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import type { AuthState } from '../types';
+import { AiAssistBar } from './AiAssistBar';
+import { useAssistAgent } from '../hooks/useAssistAgent';
 
 interface Props {
   auth:     AuthState;
@@ -35,6 +37,17 @@ export function ContentWorkspace({ onBack, onLogout }: Props) {
   const [page,        setPage]        = useState(0);
   const [hasMore,     setHasMore]     = useState(false);
   const PAGE_SIZE = 20;
+
+  // Marketing Studio agent — good for content queries, tag suggestions, copy ideas
+  const assistAgentFallback = useMemo(() => ({
+    name: 'Marketing Studio Agent',
+    developerName: 'Marketing_Studio_Agent',
+    description: 'Query CMS content and generate campaign-ready copy.',
+    icon: '✉️',
+    color: '#dd7a01',
+    category: 'Marketing',
+  }), []);
+  const assistAgent = useAssistAgent('Marketing_Studio_Agent', assistAgentFallback);
 
   useEffect(() => {
     setLoading(true);
@@ -120,6 +133,23 @@ export function ContentWorkspace({ onBack, onLogout }: Props) {
               className="w-full glass rounded-xl pl-9 pr-4 py-2 text-sm text-white/70 placeholder-white/20 focus:outline-none transition-colors" />
           </div>
         </div>
+
+        {/* AI assist bar */}
+        {assistAgent && (
+          <AiAssistBar
+            agent={assistAgent}
+            accent="#dd7a01"
+            bg="rgba(221,122,1,0.08)"
+            glow="rgba(221,122,1,0.15)"
+            placeholder="Search content by meaning — e.g. find banners about sustainability for Q3…"
+            contextPrefix="I'm in the Content workspace browsing Salesforce CMS assets. Help me with this content task:"
+            suggestions={[
+              'Suggest content for a healthcare webinar campaign',
+              'Which CMS assets should I reuse for re-engagement emails?',
+              'Draft 3 subject lines matching my banner content',
+            ]}
+          />
+        )}
 
         {/* Type filter pills */}
         <div className="flex gap-2 mb-5 shrink-0 overflow-x-auto pb-1">

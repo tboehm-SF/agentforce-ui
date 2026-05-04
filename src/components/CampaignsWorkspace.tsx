@@ -8,6 +8,31 @@ interface Props {
   onLogout: () => void;
 }
 
+interface CampaignRecord {
+  Id: string;
+  Name: string;
+  Type?: string;
+  Status?: string;
+  StartDate?: string;
+  EndDate?: string;
+  ActualCost?: number;
+  BudgetedCost?: number;
+  NumberOfLeads?: number;
+  NumberOfConvertedLeads?: number;
+  NumberOfContacts?: number;
+  NumberOfResponses?: number;
+  IsActive?: boolean;
+}
+
+function formatCurrency(n?: number) {
+  if (n == null) return '—';
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n);
+}
+
+function formatDate(d?: string) {
+  return d ? new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : '—';
+}
+
 const CAMPAIGN_AGENT_META: Record<string, { icon: string; color: string; bg: string; glow: string; description: string; tags: string[] }> = {
   Campaign_Performance_Agent: {
     icon: '📊', color: '#9050e9', bg: 'rgba(144,80,233,0.12)', glow: 'rgba(144,80,233,0.25)',
@@ -43,11 +68,13 @@ const DEFAULT_META = {
 };
 
 export function CampaignsWorkspace({ onBack, onLogout }: Props) {
-  const [agents,       setAgents]       = useState<Agent[]>([]);
-  const [loading,      setLoading]      = useState(true);
-  const [error,        setError]        = useState<string | null>(null);
-  const [activeAgent,  setActiveAgent]  = useState<Agent | null>(null);
-  const [hovered,      setHovered]      = useState<string | null>(null);
+  const [agents,        setAgents]        = useState<Agent[]>([]);
+  const [loading,       setLoading]       = useState(true);
+  const [error,         setError]         = useState<string | null>(null);
+  const [activeAgent,   setActiveAgent]   = useState<Agent | null>(null);
+  const [hovered,       setHovered]       = useState<string | null>(null);
+  const [campaigns,     setCampaigns]     = useState<CampaignRecord[]>([]);
+  const [campaignError, setCampaignError] = useState<string | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -81,6 +108,20 @@ export function CampaignsWorkspace({ onBack, onLogout }: Props) {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Load real Campaign records in parallel — works with Core OAuth
+  useEffect(() => {
+    fetch('/api/campaigns/records', { credentials: 'include' })
+      .then(async (r) => {
+        if (!r.ok) {
+          const e = await r.json().catch(() => ({ error: r.statusText }));
+          throw new Error(e.error || r.statusText);
+        }
+        return r.json();
+      })
+      .then((data) => setCampaigns(data.campaigns ?? []))
+      .catch((e) => setCampaignError(e.message));
+  }, []);
 
   return (
     <div className="relative min-h-screen flex flex-col overflow-hidden bg-space">
@@ -122,14 +163,91 @@ export function CampaignsWorkspace({ onBack, onLogout }: Props) {
 
             {/* Title */}
             {!activeAgent && (
-              <div className="shrink-0 mb-8">
+              <div className="shrink-0 mb-6">
                 <h1 className="text-3xl font-bold text-white mb-2">
                   Campaign <span style={{ background: 'linear-gradient(135deg,#9050e9,#1b96ff)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>Intelligence</span>
                 </h1>
                 <p className="text-sm text-white/35">
-                  Select a marketing AI agent to explore campaign performance, optimize spend, or generate recommendations.
+                  Real campaign data + AI agents that analyze and optimize performance.
                 </p>
               </div>
+            )}
+
+            {/* Campaign records table */}
+            {!activeAgent && campaigns.length > 0 && (
+              <div className="shrink-0 mb-6">
+                <div className="flex items-center justify-between mb-3">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-white/40">
+                    Active Campaigns
+                  </p>
+                  <p className="text-xs text-white/25">{campaigns.length} records</p>
+                </div>
+                <div className="rounded-2xl overflow-hidden max-h-64 overflow-y-auto"
+                  style={{ border: '1px solid rgba(255,255,255,0.06)' }}>
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0" style={{ background: 'rgba(10,14,25,0.9)', backdropFilter: 'blur(8px)' }}>
+                      <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                        <th className="text-left text-xs text-white/30 font-medium px-4 py-2.5">Campaign</th>
+                        <th className="text-left text-xs text-white/30 font-medium px-4 py-2.5">Status</th>
+                        <th className="text-right text-xs text-white/30 font-medium px-4 py-2.5">Leads</th>
+                        <th className="text-right text-xs text-white/30 font-medium px-4 py-2.5">Converted</th>
+                        <th className="text-right text-xs text-white/30 font-medium px-4 py-2.5">Budget</th>
+                        <th className="text-right text-xs text-white/30 font-medium px-4 py-2.5">Actual</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {campaigns.map((c) => {
+                        const converted = c.NumberOfConvertedLeads ?? 0;
+                        const leads     = c.NumberOfLeads ?? 0;
+                        const rate      = leads > 0 ? ((converted / leads) * 100).toFixed(1) : null;
+                        return (
+                          <tr key={c.Id} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                            <td className="px-4 py-2.5">
+                              <div className="text-white/85 font-medium">{c.Name}</div>
+                              <div className="text-xs text-white/30">
+                                {c.Type || '—'} · {formatDate(c.StartDate)}
+                              </div>
+                            </td>
+                            <td className="px-4 py-2.5">
+                              <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full"
+                                style={{
+                                  background: c.IsActive ? 'rgba(46,132,74,0.15)' : 'rgba(112,110,107,0.12)',
+                                  color: c.IsActive ? '#2e844a' : '#706e6b',
+                                }}>
+                                <span className="w-1 h-1 rounded-full" style={{ background: c.IsActive ? '#2e844a' : '#706e6b' }} />
+                                {c.Status || (c.IsActive ? 'Active' : 'Inactive')}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2.5 text-right text-white/70 tabular-nums">{leads.toLocaleString()}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums">
+                              <span className="text-white/70">{converted.toLocaleString()}</span>
+                              {rate && <span className="text-xs text-white/30 ml-1">({rate}%)</span>}
+                            </td>
+                            <td className="px-4 py-2.5 text-right text-white/50 tabular-nums">{formatCurrency(c.BudgetedCost)}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums"
+                              style={{ color: (c.ActualCost ?? 0) > (c.BudgetedCost ?? Infinity) ? '#dd7a01' : 'rgba(255,255,255,0.7)' }}>
+                              {formatCurrency(c.ActualCost)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {!activeAgent && campaignError && (
+              <div className="shrink-0 mb-4 rounded-xl px-4 py-2 text-xs"
+                style={{ background: 'rgba(221,122,1,0.08)', color: '#dd7a01', border: '1px solid rgba(221,122,1,0.2)' }}>
+                Couldn't load campaign records: {campaignError}
+              </div>
+            )}
+
+            {!activeAgent && (
+              <p className="text-xs font-semibold uppercase tracking-wider text-white/40 mb-3 shrink-0">
+                AI Agents
+              </p>
             )}
 
             {/* Loading */}

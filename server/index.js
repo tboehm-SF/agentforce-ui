@@ -214,6 +214,22 @@ app.get('/api/campaigns/agents', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Standard SF Campaign records — works with Core OAuth (no DC token exchange)
+app.get('/api/campaigns/records', async (req, res) => {
+  if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
+  const { accessToken, instanceUrl } = req.session.auth;
+  try {
+    const q = `SELECT Id, Name, Type, Status, StartDate, EndDate, ActualCost, BudgetedCost,
+               NumberOfLeads, NumberOfConvertedLeads, NumberOfContacts, NumberOfResponses, IsActive
+               FROM Campaign ORDER BY StartDate DESC NULLS LAST LIMIT 50`;
+    const url = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(q.replace(/\s+/g, ' '))}`;
+    const sfRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!sfRes.ok) { const e = await sfRes.text(); return res.status(sfRes.status).json({ error: e }); }
+    const data = await sfRes.json();
+    res.json({ campaigns: data.records ?? [], totalSize: data.totalSize ?? 0 });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ─── Content API (Salesforce CMS) ─────────────────────────────────────────────
 
 app.get('/api/content', async (req, res) => {
