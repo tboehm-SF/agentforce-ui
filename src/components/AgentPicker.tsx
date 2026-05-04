@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import type { AuthState, Agent } from '../types';
 import { fetchOrgAgents } from '../api/oauth';
 import { AGENTS as KNOWN_AGENTS } from '../data/agents';
+// AuthState is used for display only (username/displayName)
 
 interface Props {
   auth: AuthState;
@@ -37,13 +38,13 @@ export function AgentPicker({ auth, onConfirm, onLogout }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState<string | null>(null);
-  const [filter,   setFilter]   = useState('All');
+  const [activeCategory, setActiveCategory] = useState('All');
 
   // Load agents from org on mount
   useEffect(() => {
     async function load() {
       try {
-        const raw = await fetchOrgAgents(auth);
+        const raw = await fetchOrgAgents();
         const enriched = raw.map(enrichAgent);
         setAgents(enriched);
         // Pre-select all agents
@@ -58,7 +59,7 @@ export function AgentPicker({ auth, onConfirm, onLogout }: Props) {
   }, [auth]);
 
   const categories = ['All', ...Array.from(new Set(agents.map((a) => a.category)))];
-  const filtered   = filter === 'All' ? agents : agents.filter((a) => a.category === filter);
+  const filtered   = activeCategory === 'All' ? agents : agents.filter((a) => a.category === activeCategory);
 
   function toggleAgent(id: string) {
     setSelected((prev) => {
@@ -159,9 +160,9 @@ export function AgentPicker({ auth, onConfirm, onLogout }: Props) {
               <div className="flex gap-2 overflow-x-auto pb-1">
                 {categories.map((cat) => {
                   const colors = CATEGORY_COLORS[cat];
-                  const isActive = filter === cat;
+                  const isActive = activeCategory === cat;
                   return (
-                    <button key={cat} onClick={() => setFilter(cat)}
+                    <button key={cat} onClick={() => setActiveCategory(cat)}
                       className="shrink-0 pill transition-all"
                       style={{
                         background: isActive ? (colors?.accent ?? '#1b96ff') : 'rgba(255,255,255,0.06)',

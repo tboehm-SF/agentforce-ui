@@ -1,33 +1,151 @@
 import express from 'express';
+import session from 'express-session';
 import cors from 'cors';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const app = express();
+const app  = express();
 const PORT = process.env.PORT || 3001;
-
-app.use(cors());
-app.use(express.json());
+const isProd = process.env.NODE_ENV === 'production';
 
 // ─── Salesforce config ────────────────────────────────────────────────────────
-// SF_BASE_URL / SF_CLIENT_ID are baked in for the tboehm@hls.ch org.
-// SF_CLIENT_SECRET must be set as an env var (Heroku config or .env.local) —
-// get it from: Setup → App Manager → "Agentforce UI" → View → Consumer Secret.
-const SF_BASE_URL      = process.env.SF_BASE_URL    || 'https://storm-969c7ac7dcf66b.my.salesforce.com';
-const SF_CLIENT_ID     = process.env.SF_CLIENT_ID   || '3MVG9FofAY6PhRtG_wK6evWxsvd255jT6tc13saSSIDE9ONH58WQzf7BOVKAe.jvJqjIFh07LaQ==';
+const SF_BASE_URL      = process.env.SF_BASE_URL      || 'https://storm-969c7ac7dcf66b.my.salesforce.com';
+const SF_CLIENT_ID     = process.env.SF_CLIENT_ID     || '3MVG9FofAY6PhRtG_wK6evWxsvd255jT6tc13saSSIDE9ONH58WQzf7BOVKAe.jvJqjIFh07LaQ==';
 const SF_CLIENT_SECRET = process.env.SF_CLIENT_SECRET || '';
-const SF_API_VERSION   = process.env.SF_API_VERSION  || 'v62.0';
+const SF_API_VERSION   = process.env.SF_API_VERSION   || 'v62.0';
+const SESSION_SECRET   = process.env.SESSION_SECRET   || 'agentforce-dev-secret-change-in-prod';
 
-// In-memory token cache — one token is fine for a demo on a single dyno
+// ─── Middleware ───────────────────────────────────────────────────────────────
+app.use(cors({ origin: true, credentials: true }));
+app.use(express.json());
+app.set('trust proxy', 1); // Required behind Heroku's proxy for secure cookies
+
+app.use(session({
+  secret:            SESSION_SECRET,
+  resave:            false,
+  saveUninitialized: false,
+  cookie: {
+    secure:   isProd,   // HTTPS-only in prod
+    httpOnly: true,
+    maxAge:   2 * 60 * 60 * 1000, // 2 hours — matches SF token lifetime
+  },
+}));
+
+// ─── OAuth: Authorization Code flow ──────────────────────────────────────────
+
+// Step 1: Redirect browser to Salesforce login
+app.get('/auth/login', (req, res) => {
+  const redirectUri = `${req.protocol}://${req.get('host')}/auth/callback`;
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id:     SF_CLIENT_ID,
+    redirect_uri:  redirectUri,
+    scope:         'api openid',
+  });
+  res.redirect(`${SF_BASE_URL}/services/oauth2/authorize?${params}`);
+});
+
+// Step 2: SF sends ?code=... back here — exchange for token server-side
+app.get('/auth/callback', async (req, res) => {
+  const { code, error, error_description } = req.query;
+
+  if (error) {
+    console.error('[auth/callback] SF error:', error, error_description);
+    return res.redirect(`/?auth_error=${encodeURIComponent(error_description || error)}`);
+  }
+
+  if (!code) {
+    return res.redirect('/?auth_error=no_code');
+  }
+
+  try {
+    const redirectUri = `${req.protocol}://${req.get('host')}/auth/callback`;
+    const body = new URLSearchParams({
+      grant_type:    'authorization_code',
+      client_id:     SF_CLIENT_ID,
+      client_secret: SF_CLIENT_SECRET,
+      redirect_uri:  redirectUri,
+      code:          code,
+    });
+
+    const tokenRes = await fetch(`${SF_BASE_URL}/services/oauth2/token`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body:    body.toString(),
+    });
+
+    if (!tokenRes.ok) {
+      const err = await tokenRes.text();
+      console.error('[auth/callback] token exchange failed:', err);
+      return res.redirect(`/?auth_error=${encodeURIComponent('Token exchange failed')}`);
+    }
+
+    const tokenData = await tokenRes.json();
+
+    // Fetch user identity
+    const idRes = await fetch(tokenData.id, {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    });
+    const identity = idRes.ok ? await idRes.json() : {};
+
+    // Store everything in the server-side session (never sent to browser)
+    req.session.auth = {
+      accessToken:  tokenData.access_token,
+      instanceUrl:  tokenData.instance_url || SF_BASE_URL,
+      username:     identity.preferred_username || identity.email || '',
+      displayName:  identity.name || '',
+    };
+
+    // Send user to the React app — no tokens in the URL
+    res.redirect('/?auth=ok');
+  } catch (e) {
+    console.error('[auth/callback] exception:', e.message);
+    res.redirect(`/?auth_error=${encodeURIComponent(e.message)}`);
+  }
+});
+
+// Step 3: React app asks "am I logged in?" — returns user info (no token)
+app.get('/api/auth/me', (req, res) => {
+  if (!req.session.auth) return res.status(401).json({ authenticated: false });
+  const { username, displayName, instanceUrl } = req.session.auth;
+  res.json({ authenticated: true, username, displayName, instanceUrl });
+});
+
+// Step 4: Fetch org agents using the session token
+app.get('/api/auth/agents', async (req, res) => {
+  if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
+
+  try {
+    const { accessToken, instanceUrl } = req.session.auth;
+    const url = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=` +
+      encodeURIComponent('SELECT Id, DeveloperName, MasterLabel FROM BotDefinition ORDER BY MasterLabel');
+
+    const sfRes = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!sfRes.ok) {
+      const err = await sfRes.text();
+      return res.status(sfRes.status).json({ error: err });
+    }
+
+    const data = await sfRes.json();
+    res.json({ agents: data.records ?? [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Logout
+app.post('/api/auth/logout', (req, res) => {
+  req.session.destroy(() => res.json({ ok: true }));
+});
+
+// ─── Client-Credentials token for chat (server-to-server) ────────────────────
 let cachedToken = null;
 let tokenExpiry  = 0;
 
-// In-memory session map so message/delete routes know the agent name
-// sessionId → agentDeveloperName
-const sessionAgentMap = new Map();
-
-// ─── Auth: Client Credentials OAuth flow ──────────────────────────────────────
 async function getSFToken() {
   if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
 
@@ -50,26 +168,25 @@ async function getSFToken() {
 
   const data = await res.json();
   cachedToken = data.access_token;
-  tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
-  console.log('[auth] token refreshed, expires in', data.expires_in, 's');
+  tokenExpiry  = Date.now() + (data.expires_in - 60) * 1000;
+  console.log('[chat-auth] token refreshed');
   return cachedToken;
 }
 
-// ─── SF API base path helper ───────────────────────────────────────────────────
+// ─── Chat API ─────────────────────────────────────────────────────────────────
+const sessionAgentMap = new Map();
+
 const sfAgentBase = (agentName) =>
   `${SF_BASE_URL}/services/data/${SF_API_VERSION}/einstein/ai-agent/agents/${agentName}`;
 
-// ─── POST /api/agents/:developerName/sessions ──────────────────────────────────
 app.post('/api/agents/:developerName/sessions', async (req, res) => {
+  if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
   const { developerName } = req.params;
   try {
     const token = await getSFToken();
     const sfRes = await fetch(`${sfAgentBase(developerName)}/sessions`, {
       method:  'POST',
-      headers: {
-        Authorization:  `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         externalSessionKey:    crypto.randomUUID(),
         instanceConfig:        { endpoint: SF_BASE_URL },
@@ -84,7 +201,6 @@ app.post('/api/agents/:developerName/sessions', async (req, res) => {
     }
 
     const data = await sfRes.json();
-    // Remember which agent owns this session
     sessionAgentMap.set(data.sessionId, developerName);
     res.json({ sessionId: data.sessionId });
   } catch (e) {
@@ -93,19 +209,16 @@ app.post('/api/agents/:developerName/sessions', async (req, res) => {
   }
 });
 
-// ─── POST /api/sessions/:id/messages — stream SSE back ───────────────────────
 app.post('/api/sessions/:id/messages', async (req, res) => {
-  const { id }    = req.params;
+  if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
+  const { id }      = req.params;
   const { message } = req.body;
-
-  const agentName = sessionAgentMap.get(id);
+  const agentName   = sessionAgentMap.get(id);
   if (!agentName) return res.status(404).json({ error: 'Session not found' });
 
   try {
-    const token = await getSFToken();
-    const url   = `${sfAgentBase(agentName)}/sessions/${id}/messages`;
-
-    const sfRes = await fetch(url, {
+    const token  = await getSFToken();
+    const sfRes  = await fetch(`${sfAgentBase(agentName)}/sessions/${id}/messages`, {
       method:  'POST',
       headers: {
         Authorization:  `Bearer ${token}`,
@@ -123,15 +236,13 @@ app.post('/api/sessions/:id/messages', async (req, res) => {
       return res.status(sfRes.status).json({ error: err });
     }
 
-    // Pipe SSE stream straight to the browser
-    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Content-Type',  'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('X-Accel-Buffering', 'no'); // Disable Nginx/Heroku proxy buffering
+    res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
 
     const reader  = sfRes.body.getReader();
     const decoder = new TextDecoder();
-
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -145,32 +256,27 @@ app.post('/api/sessions/:id/messages', async (req, res) => {
   }
 });
 
-// ─── DELETE /api/sessions/:id ─────────────────────────────────────────────────
 app.delete('/api/sessions/:id', async (req, res) => {
-  const { id } = req.params;
+  const { id }    = req.params;
   const agentName = sessionAgentMap.get(id);
-  if (!agentName) return res.json({ ok: true }); // already gone
-
+  if (!agentName) return res.json({ ok: true });
   try {
     const token = await getSFToken();
     await fetch(`${sfAgentBase(agentName)}/sessions/${id}`, {
-      method:  'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
+      method: 'DELETE', headers: { Authorization: `Bearer ${token}` },
     });
     sessionAgentMap.delete(id);
     res.json({ ok: true });
   } catch (e) {
-    console.error('[delete session]', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
-// ─── Serve built React app in production ──────────────────────────────────────
-if (process.env.NODE_ENV === 'production') {
+// ─── Serve React app ──────────────────────────────────────────────────────────
+if (isProd) {
   const distPath = join(__dirname, '../dist');
   app.use(express.static(distPath));
-  // /auth/callback is the OAuth redirect URI — React handles it client-side via hash
   app.get('*', (_, r) => r.sendFile(join(distPath, 'index.html')));
 }
 
-app.listen(PORT, () => console.log(`[agentforce-ui] listening on :${PORT}`));
+app.listen(PORT, () => console.log(`[agentforce-ui] :${PORT} (${isProd ? 'production' : 'development'})`));
