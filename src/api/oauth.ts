@@ -24,7 +24,6 @@ export function buildAuthUrl(): string {
     client_id:     CLIENT_ID,
     redirect_uri:  redirectUri,
     scope:         'api openid',
-    prompt:        'login',
   });
   return `${SF_INSTANCE_URL}/services/oauth2/authorize?${params}`;
 }
