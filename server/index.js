@@ -3,6 +3,7 @@ import session from 'express-session';
 import cors from 'cors';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import crypto from 'crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app  = express();
@@ -32,21 +33,36 @@ app.use(session({
   },
 }));
 
-// ─── OAuth: Authorization Code flow ──────────────────────────────────────────
+// ─── OAuth: Authorization Code + PKCE flow (no client secret needed) ─────────
 
-// Step 1: Redirect browser to Salesforce login
+/** Base64url-encode a buffer (no padding, url-safe) */
+function base64url(buf) {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+// Step 1: Generate PKCE verifier+challenge, store in session, redirect to SF
 app.get('/auth/login', (req, res) => {
+  const codeVerifier  = base64url(crypto.randomBytes(32));
+  const codeChallenge = base64url(
+    crypto.createHash('sha256').update(codeVerifier).digest()
+  );
+
+  // Store verifier in session so callback can use it
+  req.session.pkce = codeVerifier;
+
   const redirectUri = `${req.protocol}://${req.get('host')}/auth/callback`;
   const params = new URLSearchParams({
-    response_type: 'code',
-    client_id:     SF_CLIENT_ID,
-    redirect_uri:  redirectUri,
-    scope:         'api openid',
+    response_type:          'code',
+    client_id:              SF_CLIENT_ID,
+    redirect_uri:           redirectUri,
+    scope:                  'api',
+    code_challenge:         codeChallenge,
+    code_challenge_method:  'S256',
   });
   res.redirect(`${SF_BASE_URL}/services/oauth2/authorize?${params}`);
 });
 
-// Step 2: SF sends ?code=... back here — exchange for token server-side
+// Step 2: SF sends ?code=... back — exchange using PKCE verifier (no secret)
 app.get('/auth/callback', async (req, res) => {
   const { code, error, error_description } = req.query;
 
@@ -59,14 +75,21 @@ app.get('/auth/callback', async (req, res) => {
     return res.redirect('/?auth_error=no_code');
   }
 
+  const codeVerifier = req.session.pkce;
+  if (!codeVerifier) {
+    console.error('[auth/callback] no PKCE verifier in session');
+    return res.redirect('/?auth_error=session_missing_pkce');
+  }
+  delete req.session.pkce;
+
   try {
     const redirectUri = `${req.protocol}://${req.get('host')}/auth/callback`;
     const body = new URLSearchParams({
       grant_type:    'authorization_code',
       client_id:     SF_CLIENT_ID,
-      client_secret: SF_CLIENT_SECRET,
       redirect_uri:  redirectUri,
       code:          code,
+      code_verifier: codeVerifier,
     });
 
     const tokenRes = await fetch(`${SF_BASE_URL}/services/oauth2/token`, {
@@ -78,18 +101,20 @@ app.get('/auth/callback', async (req, res) => {
     if (!tokenRes.ok) {
       const err = await tokenRes.text();
       console.error('[auth/callback] token exchange failed:', err);
-      return res.redirect(`/?auth_error=${encodeURIComponent('Token exchange failed')}`);
+      let friendlyErr = 'Token exchange failed';
+      try { const j = JSON.parse(err); friendlyErr = j.error_description || j.error || friendlyErr; } catch {}
+      return res.redirect(`/?auth_error=${encodeURIComponent(friendlyErr)}`);
     }
 
     const tokenData = await tokenRes.json();
 
-    // Fetch user identity
+    // Fetch user identity from the identity URL in the token response
     const idRes = await fetch(tokenData.id, {
       headers: { Authorization: `Bearer ${tokenData.access_token}` },
     });
     const identity = idRes.ok ? await idRes.json() : {};
 
-    // Store everything in the server-side session (never sent to browser)
+    // Store everything in the server-side session (tokens never reach the browser)
     req.session.auth = {
       accessToken:  tokenData.access_token,
       instanceUrl:  tokenData.instance_url || SF_BASE_URL,
