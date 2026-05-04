@@ -1,11 +1,9 @@
 import { useRef, useEffect, useState } from 'react';
 import type { Agent } from '../types';
-import type { SalesforceConfig } from '../types';
 import { useAgentChat } from '../hooks/useAgentChat';
 
 interface ChatWindowProps {
   agent: Agent;
-  config?: SalesforceConfig;
 }
 
 function MessageBubble({ role, content, isStreaming }: { role: 'user' | 'agent'; content: string; isStreaming?: boolean }) {

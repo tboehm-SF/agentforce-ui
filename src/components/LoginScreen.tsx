@@ -1,11 +1,7 @@
 import { useState } from 'react';
 import { buildAuthUrl } from '../api/oauth';
 
-interface Props {
-  onLogin: () => void;
-}
-
-export function LoginScreen({ onLogin }: Props) {
+export function LoginScreen() {
   const [hovering, setHovering] = useState(false);
 
   function handleLogin() {

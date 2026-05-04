@@ -73,7 +73,7 @@ export default function App() {
 
   // ── Render phase ─────────────────────────────────────────────────────────────
   if (phase === 'login') {
-    return <LoginScreen onLogin={() => {}} />;
+    return <LoginScreen />;
   }
 
   if (phase === 'agent-picker' && auth) {
