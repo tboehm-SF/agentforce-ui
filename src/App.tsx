@@ -44,17 +44,29 @@ export default function App() {
       }
     }
 
-    // Restore persisted session (page refresh)
+    // Restore persisted session (page refresh) — validate token first
     const saved = loadAuth();
     if (saved) {
-      const savedIds  = JSON.parse(sessionStorage.getItem('sf_pinned_agents') ?? '[]') as string[];
-      const agents    = savedIds.length
-        ? ALL_KNOWN_AGENTS.filter((a) => savedIds.includes(a.id))
-        : ALL_KNOWN_AGENTS;
+      // Quick ping to check the token is still alive
+      fetch(`${saved.instanceUrl}/services/oauth2/userinfo`, {
+        headers: { Authorization: `Bearer ${saved.accessToken}` },
+      }).then((res) => {
+        if (!res.ok) {
+          // Token expired — clear and stay on login
+          clearAuth();
+          return;
+        }
+        const savedIds = JSON.parse(sessionStorage.getItem('sf_pinned_agents') ?? '[]') as string[];
+        const agents   = savedIds.length
+          ? ALL_KNOWN_AGENTS.filter((a) => savedIds.includes(a.id))
+          : ALL_KNOWN_AGENTS;
 
-      setAuth(saved);
-      setPinnedAgents(agents.length ? agents : ALL_KNOWN_AGENTS);
-      setPhase('mission-control');
+        setAuth(saved);
+        setPinnedAgents(agents.length ? agents : ALL_KNOWN_AGENTS);
+        setPhase('mission-control');
+      }).catch(() => {
+        clearAuth();
+      });
     }
   }, []);
 

@@ -12,10 +12,11 @@
 
 import type { AuthState } from '../types';
 
-const SF_LOGIN_URL  = 'https://login.salesforce.com';
-const CLIENT_ID     = '3MVG9FofAY6PhRtG_wK6evWxsvd255jT6tc13saSSIDE9ONH58WQzf7BOVKAe.jvJqjIFh07LaQ==';
+// Use the My Domain URL so SF doesn't redirect mid-flow
+const SF_INSTANCE_URL = 'https://storm-969c7ac7dcf66b.my.salesforce.com';
+const CLIENT_ID       = '3MVG9FofAY6PhRtG_wK6evWxsvd255jT6tc13saSSIDE9ONH58WQzf7BOVKAe.jvJqjIFh07LaQ==';
 
-/** Build the Salesforce authorization URL. */
+/** Build the Salesforce authorization URL using the org's My Domain. */
 export function buildAuthUrl(): string {
   const redirectUri = `${window.location.origin}/auth/callback`;
   const params = new URLSearchParams({
@@ -25,7 +26,7 @@ export function buildAuthUrl(): string {
     scope:         'api openid',
     prompt:        'login',
   });
-  return `${SF_LOGIN_URL}/services/oauth2/authorize?${params}`;
+  return `${SF_INSTANCE_URL}/services/oauth2/authorize?${params}`;
 }
 
 /** Parse access_token from the URL hash after OAuth redirect. */
