@@ -1,57 +1,98 @@
 /**
- * Salesforce OAuth 2.0 helpers.
+ * Salesforce OAuth 2.0 — User-Agent (Implicit) flow.
  *
- * Flow used: Authorization Code with PKCE (recommended for SPAs).
- * The user is redirected to Salesforce, approves, and comes back
- * with ?code=... which we exchange for an access token.
+ * We use implicit because:
+ * - No backend exchange step required for the login phase
+ * - The user's token is only used for identity + agent discovery
+ * - Actual chat calls go through the server's client-credentials token
+ *
+ * Connected App: "Agentforce UI" (AgentforceUI)
+ * Consumer Key:  3MVG9FofAY6PhRtG_wK6evWxsvd255jT6tc13saSSIDE9ONH58WQzf7BOVKAe.jvJqjIFh07LaQ==
  */
 
-const SF_INSTANCE = 'https://hls-ch.my.salesforce.com';
-const SF_LOGIN = 'https://login.salesforce.com';
+import type { AuthState } from '../types';
 
-export function buildAuthUrl(clientId: string, redirectUri: string): string {
+const SF_LOGIN_URL  = 'https://login.salesforce.com';
+const CLIENT_ID     = '3MVG9FofAY6PhRtG_wK6evWxsvd255jT6tc13saSSIDE9ONH58WQzf7BOVKAe.jvJqjIFh07LaQ==';
+
+/** Build the Salesforce authorization URL. */
+export function buildAuthUrl(): string {
+  const redirectUri = `${window.location.origin}/auth/callback`;
   const params = new URLSearchParams({
-    response_type: 'token', // implicit flow — no server needed for demo
-    client_id: clientId,
-    redirect_uri: redirectUri,
-    scope: 'api openid',
+    response_type: 'token',
+    client_id:     CLIENT_ID,
+    redirect_uri:  redirectUri,
+    scope:         'api openid',
+    prompt:        'login',
   });
-  return `${SF_LOGIN}/services/oauth2/authorize?${params}`;
+  return `${SF_LOGIN_URL}/services/oauth2/authorize?${params}`;
 }
 
-export interface OAuthResult {
-  accessToken: string;
-  instanceUrl: string;
-}
-
-/**
- * Parse access_token from the URL hash after OAuth redirect.
- * Salesforce implicit flow puts tokens in the URL fragment.
- */
-export function parseOAuthCallback(hash: string): OAuthResult | null {
+/** Parse access_token from the URL hash after OAuth redirect. */
+export function parseOAuthCallback(hash: string): AuthState | null {
   const params = new URLSearchParams(hash.replace(/^#/, ''));
   const accessToken = params.get('access_token');
-  const instanceUrl = params.get('instance_url') ?? SF_INSTANCE;
-  if (!accessToken) return null;
-  return { accessToken, instanceUrl };
-}
-
-/**
- * Persist auth to sessionStorage so a page refresh doesn't log you out.
- */
-export function saveAuth(result: OAuthResult): void {
-  sessionStorage.setItem('sf_access_token', result.accessToken);
-  sessionStorage.setItem('sf_instance_url', result.instanceUrl);
-}
-
-export function loadAuth(): OAuthResult | null {
-  const accessToken = sessionStorage.getItem('sf_access_token');
-  const instanceUrl = sessionStorage.getItem('sf_instance_url');
+  const instanceUrl = params.get('instance_url');
   if (!accessToken || !instanceUrl) return null;
   return { accessToken, instanceUrl };
 }
 
+/** Fetch the logged-in user's identity info using their token. */
+export async function fetchIdentity(auth: AuthState): Promise<AuthState> {
+  const res = await fetch(`${auth.instanceUrl}/services/oauth2/userinfo`, {
+    headers: { Authorization: `Bearer ${auth.accessToken}` },
+  });
+  if (!res.ok) return auth;
+  const data = await res.json();
+  return {
+    ...auth,
+    username:    data.preferred_username ?? data.email ?? '',
+    displayName: data.name               ?? '',
+    orgName:     data.organization_id    ?? '',
+  };
+}
+
+/**
+ * Fetch all active BotDefinitions from the org using the user's token.
+ * Returns raw [{Id, DeveloperName, MasterLabel}] records.
+ */
+export async function fetchOrgAgents(auth: AuthState): Promise<Array<{
+  Id: string;
+  DeveloperName: string;
+  MasterLabel: string;
+}>> {
+  const url = `${auth.instanceUrl}/services/data/v62.0/query?q=` +
+    encodeURIComponent('SELECT Id, DeveloperName, MasterLabel FROM BotDefinition ORDER BY MasterLabel');
+
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${auth.accessToken}` },
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Failed to fetch agents: ${res.status} — ${err}`);
+  }
+
+  const data = await res.json();
+  return data.records ?? [];
+}
+
+const AUTH_KEY = 'sf_auth';
+
+export function saveAuth(auth: AuthState): void {
+  sessionStorage.setItem(AUTH_KEY, JSON.stringify(auth));
+}
+
+export function loadAuth(): AuthState | null {
+  try {
+    const raw = sessionStorage.getItem(AUTH_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function clearAuth(): void {
-  sessionStorage.removeItem('sf_access_token');
-  sessionStorage.removeItem('sf_instance_url');
+  sessionStorage.removeItem(AUTH_KEY);
+  sessionStorage.removeItem('sf_pinned_agents');
 }

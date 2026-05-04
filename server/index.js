@@ -169,6 +169,7 @@ app.delete('/api/sessions/:id', async (req, res) => {
 if (process.env.NODE_ENV === 'production') {
   const distPath = join(__dirname, '../dist');
   app.use(express.static(distPath));
+  // /auth/callback is the OAuth redirect URI — React handles it client-side via hash
   app.get('*', (_, r) => r.sendFile(join(distPath, 'index.html')));
 }
 

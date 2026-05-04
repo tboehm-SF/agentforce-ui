@@ -31,3 +31,15 @@ export interface AgentSession {
   sessionId: string;
   messages: Message[];
 }
+
+/** Auth state produced by OAuth login */
+export interface AuthState {
+  accessToken: string;
+  instanceUrl: string;
+  username?: string;
+  displayName?: string;
+  orgName?: string;
+}
+
+/** App phase — drives the 3-step onboarding */
+export type AppPhase = 'login' | 'agent-picker' | 'mission-control';
