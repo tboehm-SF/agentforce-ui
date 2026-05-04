@@ -10,9 +10,12 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-// ─── Salesforce config from env ───────────────────────────────────────────────
-const SF_BASE_URL      = process.env.SF_BASE_URL     || 'https://hls-ch.my.salesforce.com';
-const SF_CLIENT_ID     = process.env.SF_CLIENT_ID    || '';
+// ─── Salesforce config ────────────────────────────────────────────────────────
+// SF_BASE_URL / SF_CLIENT_ID are baked in for the tboehm@hls.ch org.
+// SF_CLIENT_SECRET must be set as an env var (Heroku config or .env.local) —
+// get it from: Setup → App Manager → "Agentforce UI" → View → Consumer Secret.
+const SF_BASE_URL      = process.env.SF_BASE_URL    || 'https://storm-969c7ac7dcf66b.my.salesforce.com';
+const SF_CLIENT_ID     = process.env.SF_CLIENT_ID   || '3MVG9FofAY6PhRtG_wK6evWxsvd255jT6tc13saSSIDE9ONH58WQzf7BOVKAe.jvJqjIFh07LaQ==';
 const SF_CLIENT_SECRET = process.env.SF_CLIENT_SECRET || '';
 const SF_API_VERSION   = process.env.SF_API_VERSION  || 'v62.0';
 

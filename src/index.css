@@ -21,21 +21,25 @@
 body {
   margin: 0;
   font-family: 'Salesforce Sans', system-ui, -apple-system, sans-serif;
-  background: #f3f2f2;
-  color: #3e3e3c;
+  background: #05080f;
+  color: #e2e8f0;
   -webkit-font-smoothing: antialiased;
+  overflow: hidden;
 }
 
 #root {
   width: 100%;
-  min-height: 100vh;
+  height: 100vh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
-@keyframes pulse-glow {
-  0%, 100% { box-shadow: 0 0 0 0 #1b96ff44; }
-  50% { box-shadow: 0 0 0 8px #1b96ff00; }
+/* ── Animations ─────────────────────────────────── */
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.8); }
 }
 
 @keyframes stream-cursor {
@@ -44,39 +48,156 @@ body {
 }
 
 @keyframes fadeInUp {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeInScale {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
 }
 
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
 
+@keyframes gradientShift {
+  0%   { background-position: 0% 50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@keyframes orbit {
+  from { transform: rotate(0deg) translateX(60px) rotate(0deg); }
+  to   { transform: rotate(360deg) translateX(60px) rotate(-360deg); }
+}
+
+@keyframes glowPulse {
+  0%, 100% { box-shadow: 0 0 20px 0px rgba(1, 118, 211, 0.3); }
+  50%       { box-shadow: 0 0 40px 8px rgba(1, 118, 211, 0.6); }
+}
+
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(24px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes gridMove {
+  from { background-position: 0 0; }
+  to   { background-position: 40px 40px; }
+}
+
+/* ── Utility classes ────────────────────────────── */
+
+.msg-animate    { animation: fadeInUp 0.25s ease-out; }
+.panel-animate  { animation: fadeInScale 0.2s ease-out; }
+.slide-in-right { animation: slideInRight 0.3s ease-out; }
+
 .streaming-cursor::after {
   content: '▋';
   animation: stream-cursor 0.8s infinite;
-  color: #0176d3;
+  color: #1b96ff;
   font-weight: bold;
-}
-
-.agent-active {
-  animation: pulse-glow 2s infinite;
-}
-
-.msg-animate {
-  animation: fadeInUp 0.2s ease-out;
+  margin-left: 2px;
 }
 
 .spinner {
   width: 16px; height: 16px;
-  border: 2px solid #e5e7eb;
-  border-top-color: #0176d3;
+  border: 2px solid rgba(255,255,255,0.15);
+  border-top-color: #1b96ff;
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
   display: inline-block;
 }
 
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #c9c7c5; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #706e6b; }
+.spinner-sm {
+  width: 12px; height: 12px;
+  border-width: 1.5px;
+}
+
+.live-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #2e844a;
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.glow-blue { animation: glowPulse 3s ease-in-out infinite; }
+
+/* ── Background ─────────────────────────────────── */
+
+.bg-space {
+  background:
+    radial-gradient(ellipse at 20% 20%, rgba(1, 118, 211, 0.12) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 80%, rgba(144, 80, 233, 0.10) 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 50%, rgba(6, 165, 154, 0.05) 0%, transparent 60%),
+    #05080f;
+}
+
+.bg-grid {
+  background-image:
+    linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
+  background-size: 40px 40px;
+  animation: gridMove 20s linear infinite;
+}
+
+/* ── Glass panels ───────────────────────────────── */
+
+.glass {
+  background: rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-card {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  transition: all 0.2s ease;
+}
+
+.glass-card:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(1, 118, 211, 0.4);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 32px rgba(1, 118, 211, 0.15);
+}
+
+.glass-chat {
+  background: rgba(5, 8, 15, 0.85);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* ── Scrollbars ─────────────────────────────────── */
+
+::-webkit-scrollbar         { width: 4px; }
+::-webkit-scrollbar-track   { background: transparent; }
+::-webkit-scrollbar-thumb   { background: rgba(255,255,255,0.1); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
+/* ── Gradient text ──────────────────────────────── */
+
+.gradient-text {
+  background: linear-gradient(135deg, #1b96ff 0%, #9050e9 50%, #06a59a 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: gradientShift 4s ease infinite;
+}
+
+/* ── Category pill ──────────────────────────────── */
+
+.pill {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
