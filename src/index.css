@@ -1,0 +1,82 @@
+@import "tailwindcss";
+
+@theme {
+  --color-sf-blue: #0176d3;
+  --color-sf-blue-dark: #014486;
+  --color-sf-blue-light: #1b96ff;
+  --color-sf-navy: #032d60;
+  --color-sf-cloud: #f3f2f2;
+  --color-sf-border: #dddbda;
+  --color-sf-text: #3e3e3c;
+  --color-sf-text-weak: #706e6b;
+  --color-sf-success: #2e844a;
+  --color-sf-warning: #dd7a01;
+  --color-sf-error: #ba0517;
+  --color-sf-purple: #9050e9;
+  --color-sf-teal: #06a59a;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: 'Salesforce Sans', system-ui, -apple-system, sans-serif;
+  background: #f3f2f2;
+  color: #3e3e3c;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  width: 100%;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 #1b96ff44; }
+  50% { box-shadow: 0 0 0 8px #1b96ff00; }
+}
+
+@keyframes stream-cursor {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.streaming-cursor::after {
+  content: '▋';
+  animation: stream-cursor 0.8s infinite;
+  color: #0176d3;
+  font-weight: bold;
+}
+
+.agent-active {
+  animation: pulse-glow 2s infinite;
+}
+
+.msg-animate {
+  animation: fadeInUp 0.2s ease-out;
+}
+
+.spinner {
+  width: 16px; height: 16px;
+  border: 2px solid #e5e7eb;
+  border-top-color: #0176d3;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  display: inline-block;
+}
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #c9c7c5; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #706e6b; }
