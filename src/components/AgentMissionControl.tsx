@@ -18,13 +18,13 @@ const CATEGORY_COLORS: Record<string, { accent: string; bg: string; glow: string
 };
 
 export function AgentMissionControl({ activeAgent, onSelectAgent, agents, auth, onLogout }: Props) {
-  const [filter, setFilter] = useState<string>('All');
+  const [activeCategory, setActiveCategory] = useState<string>('All');
   const [search, setSearch] = useState('');
 
   const categories = ['All', ...Array.from(new Set(agents.map((a) => a.category)))];
 
   const filtered = agents.filter((a) => {
-    const matchCat    = filter === 'All' || a.category === filter;
+    const matchCat    = activeCategory === 'All' || a.category === activeCategory;
     const matchSearch = !search
       || a.name.toLowerCase().includes(search.toLowerCase())
       || a.description.toLowerCase().includes(search.toLowerCase());
@@ -98,9 +98,9 @@ export function AgentMissionControl({ activeAgent, onSelectAgent, agents, auth, 
       <div className="px-6 pb-3 flex gap-1.5 shrink-0 overflow-x-auto">
         {categories.map((cat) => {
           const colors = CATEGORY_COLORS[cat];
-          const isActive = filter === cat;
+          const isActive = activeCategory === cat;
           return (
-            <button key={cat} onClick={() => setFilter(cat)}
+            <button key={cat} onClick={() => setActiveCategory(cat)}
               className="shrink-0 pill transition-all"
               style={{
                 background: isActive ? (colors?.accent ?? '#1b96ff') : 'rgba(255,255,255,0.05)',

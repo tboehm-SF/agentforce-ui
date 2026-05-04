@@ -36,7 +36,7 @@ export function ChatWindow({ agent, config }: ChatWindowProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const { messages, sendMessage, clearChat, isLoading, isStreaming, streamingText, error } =
-    useAgentChat({ config, agentApiName: agent.developerName });
+    useAgentChat({ agentApiName: agent.developerName });
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
