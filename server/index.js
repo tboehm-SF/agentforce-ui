@@ -275,116 +275,143 @@ app.get('/api/content', async (req, res) => {
 });
 
 // ─── Chat API ─────────────────────────────────────────────────────────────────
-// Uses the Agent Runtime API v1 — completely separate from the REST data API.
-// Endpoint base: api_instance_url from the token response (not My Domain URL).
-// Agent identifier: 18-char BotDefinition record ID (e.g. 0Xxg...), not developerName.
-const sessionAgentMap = new Map();
+// CRITICAL: The Agent Runtime API (Agentforce v1) requires a JWT token that is
+// DIFFERENT from the standard Core OAuth access token. Flow:
+//   1. Exchange the Core access token via GET {instanceUrl}/agentforce/bootstrap/nameduser
+//      sending the access token as Cookie (sid={token}), NOT Bearer.
+//   2. Response is JSON { access_token: "<JWT>" } — that JWT is scoped for api.salesforce.com.
+//   3. Use that JWT as Bearer to POST https://api.salesforce.com/einstein/ai-agent/v1/agents/{id}/sessions.
+//   4. Session create body MUST NOT include `bypassUser: true` for user-driven flows.
+// The endpoint falls back through 3 hosts: api / test.api / dev.api (matches @salesforce/agents plugin).
+// We cache the Agent JWT per session to avoid re-exchanging on every message.
 
-// Agent Runtime API v1 — two known path conventions; we try the primary,
-// then fall back to the versioned data path used by some newer orgs.
-const agentApiBasePrimary = (apiInstanceUrl, agentId) =>
-  `${apiInstanceUrl}/einstein/ai-agent/v1/agents/${agentId}`;
-const agentApiBaseVersioned = (apiInstanceUrl, agentId) =>
-  `${apiInstanceUrl}/services/data/${SF_API_VERSION}/einstein/ai-agent/v1/agents/${agentId}`;
-const agentApiBase = agentApiBasePrimary; // primary alias used by existing send/delete paths
+const sessionAgentMap = new Map();
+const AGENT_API_HOSTS = ['api.salesforce.com', 'test.api.salesforce.com', 'dev.api.salesforce.com'];
+
+/** Exchange the Core OAuth access token for an Agent-API-scoped JWT. */
+async function exchangeForAgentJwt(instanceUrl, accessToken) {
+  const url = `${instanceUrl}/agentforce/bootstrap/nameduser`;
+  const r = await fetch(url, {
+    method: 'GET',
+    headers: { Cookie: `sid=${accessToken}`, 'Content-Type': 'application/json' },
+  });
+  if (!r.ok) {
+    const body = await r.text();
+    throw new Error(
+      `Agent JWT exchange failed (${r.status}). Ensure the Connected App has scope ` +
+      `'chatbot_api' + 'api' and Agentforce is enabled on the org. Body: ${body.slice(0, 200)}`
+    );
+  }
+  const data = await r.json();
+  if (!data.access_token) throw new Error(`JWT exchange returned no access_token: ${JSON.stringify(data).slice(0, 200)}`);
+  return data.access_token;
+}
+
+/** Fetch a URL against api.salesforce.com with automatic endpoint fallback (prod → test → dev). */
+async function fetchAgentApi(path, options) {
+  let lastErr;
+  for (const host of AGENT_API_HOSTS) {
+    const url = `https://${host}${path}`;
+    const r = await fetch(url, options);
+    if (r.status !== 404) return r;
+    lastErr = r;
+  }
+  return lastErr; // all 404 — return the last one so caller gets a consistent response object
+}
 
 app.post('/api/agents/:agentId/sessions', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
   const { agentId } = req.params;
-  const { accessToken, instanceUrl, apiInstanceUrl } = req.session.auth;
+  const { accessToken, instanceUrl } = req.session.auth;
 
-  // Validate the agentId format — must be an 18-char SF record ID (starts with 0Xx for BotDefinition)
   if (!agentId || !/^0X[A-Za-z0-9]{13,16}$/.test(agentId)) {
     return res.status(400).json({
-      error: `Invalid agent ID: "${agentId}". Expected 18-char BotDefinition record ID (starts with 0Xx).`,
+      error: `Invalid agent ID: "${agentId}". Expected 18-char BotDefinition record ID (starts with 0X).`,
     });
   }
 
   try {
-    const sessionBody = JSON.stringify({
-      externalSessionKey:    crypto.randomUUID(),
-      instanceConfig:        { endpoint: instanceUrl },
-      featureSupport:        'Streaming',
-      streamingCapabilities: { chunkTypes: ['Text'] },
-      bypassUser:            true,
-    });
-    const sessionHeaders = { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
+    // 1. Exchange Core token → Agent-API JWT
+    const agentJwt = await exchangeForAgentJwt(instanceUrl, accessToken);
 
-    // Try primary path first, then versioned fallback if we get a 404
-    let sfRes = await fetch(`${agentApiBasePrimary(apiInstanceUrl, agentId)}/sessions`, {
-      method: 'POST', headers: sessionHeaders, body: sessionBody,
+    // 2. Create session on api.salesforce.com
+    const sfRes = await fetchAgentApi(`/einstein/ai-agent/v1/agents/${agentId}/sessions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${agentJwt}`,
+        'Content-Type': 'application/json',
+        'x-client-name': 'agentforce-ui',
+      },
+      body: JSON.stringify({
+        externalSessionKey:    crypto.randomUUID(),
+        instanceConfig:        { endpoint: instanceUrl },
+        streamingCapabilities: { chunkTypes: ['Text'] },
+      }),
     });
-    let usedPath = 'primary';
-
-    if (sfRes.status === 404) {
-      console.log('[create session] primary path 404, trying versioned path for agent', agentId);
-      const alt = await fetch(`${agentApiBaseVersioned(apiInstanceUrl, agentId)}/sessions`, {
-        method: 'POST', headers: sessionHeaders, body: sessionBody,
-      });
-      if (alt.ok) {
-        sfRes = alt;
-        usedPath = 'versioned';
-      }
-      // If alt also failed, keep the original 404 response for better error reporting
-    }
 
     if (!sfRes.ok) {
       const rawErr = await sfRes.text();
-      const contentType = sfRes.headers.get('content-type') || '';
-      console.error(`[create session] SF error (${usedPath}):`, sfRes.status, rawErr.slice(0, 500));
-
-      // Salesforce returns an HTML 404 page ("URL No Longer Exists") when the BotDefinition
-      // is not an Agentforce Service Agent (e.g. it's a legacy Einstein Bot or the agent
-      // isn't activated for the Agent Runtime API). Translate that into a clear message.
-      if (sfRes.status === 404 && contentType.includes('text/html')) {
-        return res.status(404).json({
-          error:
-            'This agent is not reachable via the Agent Runtime API. The record exists as a ' +
-            "BotDefinition but isn't an Agentforce agent that's activated for API access. " +
-            'Check in Setup → Agents that this agent has Status = Active and that the ' +
-            '"Enable Agentforce for your org" setting is turned on.',
-          agentId,
-          hint: 'AGENT_NOT_AGENTFORCE_API_ENABLED',
-        });
-      }
-
-      // Try to extract a JSON error body if SF returned one
+      console.error('[create session] Agent API error:', sfRes.status, rawErr.slice(0, 500));
       let parsedErr = rawErr;
       try {
-        const json = JSON.parse(rawErr);
-        parsedErr = json.message || json.error || json.errorCode || rawErr;
-      } catch { /* leave as raw text */ }
-
-      return res.status(sfRes.status).json({ error: String(parsedErr).slice(0, 500) });
+        const j = JSON.parse(rawErr);
+        parsedErr = j.message || j.error || j.errorCode || rawErr;
+      } catch { /* keep raw */ }
+      return res.status(sfRes.status).json({
+        error: `Agent session creation failed (${sfRes.status}): ${String(parsedErr).slice(0, 400)}`,
+        agentId,
+      });
     }
 
     const data = await sfRes.json();
-    sessionAgentMap.set(data.sessionId, { agentId, apiInstanceUrl, instanceUrl, accessToken, sequenceId: 0 });
-    res.json({ sessionId: data.sessionId });
+    // Cache JWT + agent context so we don't re-exchange on every message
+    sessionAgentMap.set(data.sessionId, {
+      agentId,
+      instanceUrl,
+      accessToken,
+      agentJwt,
+      jwtAcquiredAt: Date.now(),
+      sequenceId: 0,
+    });
+    // Include the greeting message so the UI can show it immediately
+    res.json({
+      sessionId: data.sessionId,
+      greeting: data.messages?.[0]?.message,
+    });
   } catch (e) {
     console.error('[create session]', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
+/** Refresh the JWT if it's older than 50 minutes (they expire at 60). */
+async function getFreshJwt(sessionInfo) {
+  const ageMin = (Date.now() - sessionInfo.jwtAcquiredAt) / 60000;
+  if (ageMin < 50) return sessionInfo.agentJwt;
+  sessionInfo.agentJwt = await exchangeForAgentJwt(sessionInfo.instanceUrl, sessionInfo.accessToken);
+  sessionInfo.jwtAcquiredAt = Date.now();
+  return sessionInfo.agentJwt;
+}
+
 app.post('/api/sessions/:id/messages', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
   const { id }      = req.params;
   const { message } = req.body;
   const sessionInfo = sessionAgentMap.get(id);
-  if (!sessionInfo) return res.status(404).json({ error: 'Session not found' });
+  if (!sessionInfo) return res.status(404).json({ error: 'Session not found or expired. Start a new chat.' });
 
-  // sequenceId must increment with each message in the session
   sessionInfo.sequenceId += 1;
-  const { agentId, apiInstanceUrl, accessToken, sequenceId } = sessionInfo;
+  const { sequenceId } = sessionInfo;
 
   try {
-    const sfRes = await fetch(`${agentApiBase(apiInstanceUrl, agentId)}/sessions/${id}/messages/stream`, {
-      method:  'POST',
+    const jwt = await getFreshJwt(sessionInfo);
+    const sfRes = await fetchAgentApi(`/einstein/ai-agent/v1/sessions/${id}/messages/stream`, {
+      method: 'POST',
       headers: {
-        Authorization:  `Bearer ${accessToken}`,
+        Authorization: `Bearer ${jwt}`,
         'Content-Type': 'application/json',
-        Accept:         'text/event-stream',
+        Accept: 'text/event-stream',
+        'x-client-name': 'agentforce-ui',
       },
       body: JSON.stringify({
         message: { sequenceId, type: 'Text', text: message },
@@ -394,8 +421,13 @@ app.post('/api/sessions/:id/messages', async (req, res) => {
 
     if (!sfRes.ok) {
       const err = await sfRes.text();
-      console.error('[send message] SF error:', sfRes.status, err);
-      return res.status(sfRes.status).json({ error: err });
+      console.error('[send message] Agent API error:', sfRes.status, err.slice(0, 500));
+      let parsed = err;
+      try {
+        const j = JSON.parse(err);
+        parsed = j.message || j.error || err;
+      } catch { /* keep raw */ }
+      return res.status(sfRes.status).json({ error: String(parsed).slice(0, 400) });
     }
 
     res.setHeader('Content-Type',  'text/event-stream');
@@ -419,19 +451,25 @@ app.post('/api/sessions/:id/messages', async (req, res) => {
 });
 
 app.delete('/api/sessions/:id', async (req, res) => {
-  const { id }      = req.params;
+  const { id } = req.params;
   const sessionInfo = sessionAgentMap.get(id);
   if (!sessionInfo) return res.json({ ok: true });
-  const { agentId, apiInstanceUrl, accessToken } = sessionInfo;
   try {
-    await fetch(`${agentApiBase(apiInstanceUrl, agentId)}/sessions/${id}`, {
-      method:  'DELETE',
-      headers: { Authorization: `Bearer ${accessToken}`, 'x-session-end-reason': 'UserRequest' },
+    const jwt = await getFreshJwt(sessionInfo);
+    await fetchAgentApi(`/einstein/ai-agent/v1/sessions/${id}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+        'x-session-end-reason': 'UserRequest',
+        'x-client-name': 'agentforce-ui',
+      },
     });
     sessionAgentMap.delete(id);
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    // Silent failure is fine — session will time out server-side
+    sessionAgentMap.delete(id);
+    res.json({ ok: true, warning: e.message });
   }
 });
 
