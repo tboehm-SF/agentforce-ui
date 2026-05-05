@@ -258,19 +258,71 @@ app.get('/api/campaigns/records', async (req, res) => {
 });
 
 // ─── Content API (Salesforce CMS) ─────────────────────────────────────────────
+// Uses the CMS Delivery API (GET-based) instead of /connect/cms/contents which
+// requires POST and doesn't accept simple paging params. Walks all channels the
+// user has access to and aggregates items, de-duplicated by contentKey.
+
+app.get('/api/channels', async (req, res) => {
+  if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
+  const { accessToken, instanceUrl } = req.session.auth;
+  try {
+    const sfRes = await fetch(
+      `${instanceUrl}/services/data/${SF_API_VERSION}/connect/cms/delivery/channels`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!sfRes.ok) { const e = await sfRes.text(); return res.status(sfRes.status).json({ error: e }); }
+    res.json(await sfRes.json());
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 app.get('/api/content', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
   const { accessToken, instanceUrl } = req.session.auth;
   try {
-    const type = req.query.type || '';
-    const page = parseInt(req.query.page || '0', 10);
+    const type     = req.query.type || '';
+    const page     = parseInt(req.query.page || '0', 10);
     const pageSize = parseInt(req.query.pageSize || '20', 10);
-    let url = `${instanceUrl}/services/data/${SF_API_VERSION}/connect/cms/contents?page=${page}&pageSize=${pageSize}`;
-    if (type) url += `&managedContentType=${encodeURIComponent(type)}`;
-    const sfRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-    if (!sfRes.ok) { const e = await sfRes.text(); return res.status(sfRes.status).json({ error: e }); }
-    res.json(await sfRes.json());
+
+    // 1. List channels
+    const chRes = await fetch(
+      `${instanceUrl}/services/data/${SF_API_VERSION}/connect/cms/delivery/channels`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!chRes.ok) { const e = await chRes.text(); return res.status(chRes.status).json({ error: e }); }
+    const { channels = [] } = await chRes.json();
+
+    // 2. Query each channel in parallel (cap to first 10 to avoid API limits)
+    const perChannelBatch = 25;
+    const channelResults = await Promise.all(
+      channels.slice(0, 10).map(async (ch) => {
+        let url = `${instanceUrl}/services/data/${SF_API_VERSION}/connect/cms/delivery/channels/${ch.id}/contents/query?pageParam=0&pageSize=${perChannelBatch}`;
+        if (type) url += `&managedContentType=${encodeURIComponent(type)}`;
+        try {
+          const r = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+          if (!r.ok) return { items: [], total: 0 };
+          return r.json();
+        } catch { return { items: [], total: 0 }; }
+      })
+    );
+
+    // 3. De-duplicate by contentKey (same asset appears in multiple channels)
+    const seen = new Map();
+    for (const cr of channelResults) {
+      for (const item of cr.items || []) {
+        const key = item.contentKey || item.contentUrlName || item.id;
+        if (key && !seen.has(key)) seen.set(key, item);
+      }
+    }
+    const allItems = Array.from(seen.values());
+
+    // 4. Paginate the de-duplicated results
+    const start = page * pageSize;
+    const pageItems = allItems.slice(start, start + pageSize);
+    res.json({
+      items: pageItems,
+      total: allItems.length,
+      nextPageUrl: start + pageSize < allItems.length ? `?page=${page + 1}` : null,
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
