@@ -257,23 +257,13 @@ app.get('/api/campaigns/records', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Content API (Salesforce CMS) ─────────────────────────────────────────────
-// Uses the CMS Delivery API (GET-based) instead of /connect/cms/contents which
-// requires POST and doesn't accept simple paging params. Walks all channels the
-// user has access to and aggregates items, de-duplicated by contentKey.
+// ─── Content API (Salesforce CMS Workspace "Default_Content_Workspace") ──────
+// Shows the assets in the Default Content Workspace (0Zug7000000GnsoCAC).
+// Uses SOQL on ManagedContent filtered by AuthoredManagedContentSpaceId, then
+// enriches each item with its contentBody (via the /contents/{key} endpoint)
+// to surface thumbnails and rich text.
 
-app.get('/api/channels', async (req, res) => {
-  if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
-  const { accessToken, instanceUrl } = req.session.auth;
-  try {
-    const sfRes = await fetch(
-      `${instanceUrl}/services/data/${SF_API_VERSION}/connect/cms/delivery/channels`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    if (!sfRes.ok) { const e = await sfRes.text(); return res.status(sfRes.status).json({ error: e }); }
-    res.json(await sfRes.json());
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+const CMS_WORKSPACE_ID = process.env.CMS_WORKSPACE_ID || '0Zug7000000GnsoCAC';
 
 app.get('/api/content', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
@@ -283,45 +273,79 @@ app.get('/api/content', async (req, res) => {
     const page     = parseInt(req.query.page || '0', 10);
     const pageSize = parseInt(req.query.pageSize || '20', 10);
 
-    // 1. List channels
-    const chRes = await fetch(
-      `${instanceUrl}/services/data/${SF_API_VERSION}/connect/cms/delivery/channels`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    if (!chRes.ok) { const e = await chRes.text(); return res.status(chRes.status).json({ error: e }); }
-    const { channels = [] } = await chRes.json();
+    // 1. List all assets in the workspace
+    let whereClause = `AuthoredManagedContentSpaceId='${CMS_WORKSPACE_ID}'`;
+    if (type) {
+      // Map friendly filter values to ContentTypeFullyQualifiedName
+      const typeMap = {
+        cms_image: 'sfdc_cms__image',
+        image:     'sfdc_cms__image',
+        document:  'sfdc_cms__document',
+        news:      'sfdc_cms__news',
+        email:     'sfdc_cms__email',
+      };
+      const cmsType = typeMap[type] || type;
+      whereClause += ` AND ContentTypeFullyQualifiedName='${cmsType}'`;
+    }
+    const q =
+      `SELECT Id, Name, ApiName, ContentKey, ContentTypeFullyQualifiedName, ` +
+      `CreatedDate, LastModifiedDate FROM ManagedContent WHERE ${whereClause} ` +
+      `ORDER BY LastModifiedDate DESC LIMIT 200`;
+    const qUrl = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(q)}`;
+    const qRes = await fetch(qUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!qRes.ok) { const e = await qRes.text(); return res.status(qRes.status).json({ error: e }); }
+    const { records = [], totalSize = 0 } = await qRes.json();
 
-    // 2. Query each channel in parallel (cap to first 10 to avoid API limits)
-    const perChannelBatch = 25;
-    const channelResults = await Promise.all(
-      channels.slice(0, 10).map(async (ch) => {
-        let url = `${instanceUrl}/services/data/${SF_API_VERSION}/connect/cms/delivery/channels/${ch.id}/contents/query?pageParam=0&pageSize=${perChannelBatch}`;
-        if (type) url += `&managedContentType=${encodeURIComponent(type)}`;
+    // 2. Paginate to the requested window
+    const start = page * pageSize;
+    const pageRecords = records.slice(start, start + pageSize);
+
+    // 3. Enrich each item with its rendered body (parallel, best-effort)
+    const enriched = await Promise.all(
+      pageRecords.map(async (r) => {
+        const short = {
+          id:                 r.Id,
+          contentKey:         r.ContentKey,
+          title:              r.Name,
+          apiName:            r.ApiName,
+          managedContentType: (r.ContentTypeFullyQualifiedName || '').replace('sfdc_cms__', ''),
+          contentTypeFqn:     r.ContentTypeFullyQualifiedName,
+          publishedDate:      r.LastModifiedDate,
+        };
         try {
-          const r = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-          if (!r.ok) return { items: [], total: 0 };
-          return r.json();
-        } catch { return { items: [], total: 0 }; }
+          const dRes = await fetch(
+            `${instanceUrl}/services/data/${SF_API_VERSION}/connect/cms/contents/${r.ContentKey}`,
+            { headers: { Authorization: `Bearer ${accessToken}` } }
+          );
+          if (!dRes.ok) return short;
+          const detail = await dRes.json();
+          const body   = detail.contentBody || {};
+          // Build contentNodes in a shape the UI already expects
+          const contentNodes = {};
+          if (body['sfdc_cms:media']?.url) {
+            contentNodes.source = {
+              // Prefix instanceUrl so the browser can load it with cookies/session
+              value:    `${instanceUrl}${body['sfdc_cms:media'].url}`,
+              nodeType: 'Media',
+            };
+          }
+          if (body['sfdc_cms:media']?.altText) {
+            contentNodes.altText = { value: body['sfdc_cms:media'].altText, nodeType: 'Text' };
+          }
+          if (body.title) contentNodes.title = { value: body.title, nodeType: 'Text' };
+          if (body.excerpt || body.summary) {
+            contentNodes.excerpt = { value: body.excerpt || body.summary, nodeType: 'Text' };
+          }
+          return { ...short, contentNodes, isPublished: detail.isPublished };
+        } catch { return short; }
       })
     );
 
-    // 3. De-duplicate by contentKey (same asset appears in multiple channels)
-    const seen = new Map();
-    for (const cr of channelResults) {
-      for (const item of cr.items || []) {
-        const key = item.contentKey || item.contentUrlName || item.id;
-        if (key && !seen.has(key)) seen.set(key, item);
-      }
-    }
-    const allItems = Array.from(seen.values());
-
-    // 4. Paginate the de-duplicated results
-    const start = page * pageSize;
-    const pageItems = allItems.slice(start, start + pageSize);
     res.json({
-      items: pageItems,
-      total: allItems.length,
-      nextPageUrl: start + pageSize < allItems.length ? `?page=${page + 1}` : null,
+      items: enriched,
+      total: totalSize,
+      nextPageUrl: start + pageSize < totalSize ? `?page=${page + 1}` : null,
+      workspace: { id: CMS_WORKSPACE_ID },
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

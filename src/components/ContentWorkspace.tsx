@@ -18,15 +18,15 @@ interface ContentItem {
 }
 
 const TYPE_META: Record<string, { label: string; icon: string; color: string; bg: string }> = {
-  news:       { label: 'News',       icon: '📰', color: '#1b96ff', bg: 'rgba(1,118,211,0.12)' },
-  cms_image:  { label: 'Image',      icon: '🖼️', color: '#06a59a', bg: 'rgba(6,165,154,0.12)' },
-  document:   { label: 'Document',   icon: '📄', color: '#dd7a01', bg: 'rgba(221,122,1,0.12)' },
-  video:      { label: 'Video',      icon: '🎬', color: '#9050e9', bg: 'rgba(144,80,233,0.12)' },
-  banner:     { label: 'Banner',     icon: '🏷️', color: '#2e844a', bg: 'rgba(46,132,74,0.12)' },
+  email:    { label: 'Email',    icon: '✉️', color: '#dd7a01', bg: 'rgba(221,122,1,0.12)' },
+  image:    { label: 'Image',    icon: '🖼️', color: '#06a59a', bg: 'rgba(6,165,154,0.12)' },
+  document: { label: 'Document', icon: '📄', color: '#9050e9', bg: 'rgba(144,80,233,0.12)' },
+  news:     { label: 'News',     icon: '📰', color: '#1b96ff', bg: 'rgba(1,118,211,0.12)' },
+  brand:    { label: 'Brand',    icon: '🎨', color: '#2e844a', bg: 'rgba(46,132,74,0.12)' },
 };
 const DEFAULT_TYPE = { label: 'Content', icon: '🧩', color: '#dd7a01', bg: 'rgba(221,122,1,0.12)' };
 
-const FILTER_TYPES = ['all', 'news', 'cms_image', 'document', 'video', 'banner'];
+const FILTER_TYPES = ['all', 'email', 'image', 'document', 'news', 'brand'];
 
 export function ContentWorkspace({ onBack, onLogout }: Props) {
   const [items,       setItems]       = useState<ContentItem[]>([]);
@@ -103,7 +103,7 @@ export function ContentWorkspace({ onBack, onLogout }: Props) {
             </div>
             <div>
               <div className="text-white font-semibold text-sm leading-none">Content</div>
-              <div className="text-white/30 text-xs mt-0.5">Salesforce CMS assets</div>
+              <div className="text-white/30 text-xs mt-0.5">Default Content Workspace</div>
             </div>
           </div>
           <button onClick={onLogout}
@@ -118,7 +118,7 @@ export function ContentWorkspace({ onBack, onLogout }: Props) {
             <h1 className="text-3xl font-bold text-white mb-1">
               CMS <span style={{ background: 'linear-gradient(135deg,#dd7a01,#e8a201)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>Content</span>
             </h1>
-            <p className="text-sm text-white/35">Browse and search your Salesforce CMS assets</p>
+            <p className="text-sm text-white/35">Browse assets from your <code className="text-white/50 text-xs">Default_Content_Workspace</code> — emails, images, and branded templates</p>
           </div>
 
           {/* Search */}
