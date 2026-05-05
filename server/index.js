@@ -139,17 +139,28 @@ app.get('/api/auth/me', (req, res) => {
 });
 
 // Step 4: Fetch org agents using the session token — include Id (record ID needed for Agent API)
+// CRITICAL: Only AgentforceServiceAgent types work with /einstein/ai-agent/v1/.
+// Legacy EinsteinServiceAgent / MyDomainChatbot / ExternalCopilot return HTML 404s.
 app.get('/api/auth/agents', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
 
   try {
     const { accessToken, instanceUrl } = req.session.auth;
-    const url = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=` +
-      encodeURIComponent('SELECT Id, DeveloperName, MasterLabel FROM BotDefinition ORDER BY MasterLabel');
+    // Include Type + IsDeleted so the client can filter to reachable agents only.
+    // Some orgs don't expose Type on BotDefinition — if that fails we fall back.
+    const queryWithType =
+      "SELECT Id, DeveloperName, MasterLabel, Type FROM BotDefinition " +
+      "WHERE IsDeleted = FALSE ORDER BY MasterLabel";
+    const queryNoType =
+      "SELECT Id, DeveloperName, MasterLabel FROM BotDefinition ORDER BY MasterLabel";
 
-    const sfRes = await fetch(url, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    async function runQuery(q) {
+      const url = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(q)}`;
+      return fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    }
+
+    let sfRes = await runQuery(queryWithType);
+    if (!sfRes.ok) sfRes = await runQuery(queryNoType);
 
     if (!sfRes.ok) {
       const err = await sfRes.text();
@@ -204,10 +215,26 @@ app.get('/api/campaigns/agents', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
   const { accessToken, instanceUrl } = req.session.auth;
   try {
-    // Return the marketing-relevant agents for the campaigns workspace
-    const q = "SELECT Id, DeveloperName, MasterLabel FROM BotDefinition WHERE DeveloperName IN ('Campaign_Performance_Agent','Marketing_NBA_Campaign_Agent','Paid_Media_Optimization_Agent','Marketing_Studio_Agent','Analytics_and_Visualization') ORDER BY MasterLabel";
-    const url = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(q)}`;
-    const sfRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    // Return ALL candidate marketing agents from the org. The client probes each
+    // with a HEAD/preflight to know which are reachable via the Agent Runtime API.
+    // Type column added so the client can filter out legacy Einstein bots.
+    const q =
+      "SELECT Id, DeveloperName, MasterLabel, Type FROM BotDefinition " +
+      "WHERE DeveloperName IN ('Campaign_Performance_Agent','Marketing_NBA_Campaign_Agent'," +
+      "'Paid_Media_Optimization_Agent','Marketing_Studio_Agent','Analytics_and_Visualization') " +
+      "ORDER BY MasterLabel";
+
+    // Try with Type first; if Type column is unavailable in this org, fall back
+    const qNoType = q.replace(', Type', '');
+
+    async function runQuery(query) {
+      const url = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(query)}`;
+      return fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    }
+
+    let sfRes = await runQuery(q);
+    if (!sfRes.ok) sfRes = await runQuery(qNoType);
+
     if (!sfRes.ok) { const e = await sfRes.text(); return res.status(sfRes.status).json({ error: e }); }
     const data = await sfRes.json();
     res.json({ agents: data.records ?? [] });
@@ -253,31 +280,82 @@ app.get('/api/content', async (req, res) => {
 // Agent identifier: 18-char BotDefinition record ID (e.g. 0Xxg...), not developerName.
 const sessionAgentMap = new Map();
 
-// Agent Runtime API v1 — correct path structure confirmed from SF docs
-const agentApiBase = (apiInstanceUrl, agentId) =>
+// Agent Runtime API v1 — two known path conventions; we try the primary,
+// then fall back to the versioned data path used by some newer orgs.
+const agentApiBasePrimary = (apiInstanceUrl, agentId) =>
   `${apiInstanceUrl}/einstein/ai-agent/v1/agents/${agentId}`;
+const agentApiBaseVersioned = (apiInstanceUrl, agentId) =>
+  `${apiInstanceUrl}/services/data/${SF_API_VERSION}/einstein/ai-agent/v1/agents/${agentId}`;
+const agentApiBase = agentApiBasePrimary; // primary alias used by existing send/delete paths
 
 app.post('/api/agents/:agentId/sessions', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
   const { agentId } = req.params;
   const { accessToken, instanceUrl, apiInstanceUrl } = req.session.auth;
-  try {
-    const sfRes = await fetch(`${agentApiBase(apiInstanceUrl, agentId)}/sessions`, {
-      method:  'POST',
-      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        externalSessionKey:    crypto.randomUUID(),
-        instanceConfig:        { endpoint: instanceUrl },
-        featureSupport:        'Streaming',
-        streamingCapabilities: { chunkTypes: ['Text'] },
-        bypassUser:            true,
-      }),
+
+  // Validate the agentId format — must be an 18-char SF record ID (starts with 0Xx for BotDefinition)
+  if (!agentId || !/^0X[A-Za-z0-9]{13,16}$/.test(agentId)) {
+    return res.status(400).json({
+      error: `Invalid agent ID: "${agentId}". Expected 18-char BotDefinition record ID (starts with 0Xx).`,
     });
+  }
+
+  try {
+    const sessionBody = JSON.stringify({
+      externalSessionKey:    crypto.randomUUID(),
+      instanceConfig:        { endpoint: instanceUrl },
+      featureSupport:        'Streaming',
+      streamingCapabilities: { chunkTypes: ['Text'] },
+      bypassUser:            true,
+    });
+    const sessionHeaders = { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
+
+    // Try primary path first, then versioned fallback if we get a 404
+    let sfRes = await fetch(`${agentApiBasePrimary(apiInstanceUrl, agentId)}/sessions`, {
+      method: 'POST', headers: sessionHeaders, body: sessionBody,
+    });
+    let usedPath = 'primary';
+
+    if (sfRes.status === 404) {
+      console.log('[create session] primary path 404, trying versioned path for agent', agentId);
+      const alt = await fetch(`${agentApiBaseVersioned(apiInstanceUrl, agentId)}/sessions`, {
+        method: 'POST', headers: sessionHeaders, body: sessionBody,
+      });
+      if (alt.ok) {
+        sfRes = alt;
+        usedPath = 'versioned';
+      }
+      // If alt also failed, keep the original 404 response for better error reporting
+    }
 
     if (!sfRes.ok) {
-      const err = await sfRes.text();
-      console.error('[create session] SF error:', sfRes.status, err);
-      return res.status(sfRes.status).json({ error: err });
+      const rawErr = await sfRes.text();
+      const contentType = sfRes.headers.get('content-type') || '';
+      console.error(`[create session] SF error (${usedPath}):`, sfRes.status, rawErr.slice(0, 500));
+
+      // Salesforce returns an HTML 404 page ("URL No Longer Exists") when the BotDefinition
+      // is not an Agentforce Service Agent (e.g. it's a legacy Einstein Bot or the agent
+      // isn't activated for the Agent Runtime API). Translate that into a clear message.
+      if (sfRes.status === 404 && contentType.includes('text/html')) {
+        return res.status(404).json({
+          error:
+            'This agent is not reachable via the Agent Runtime API. The record exists as a ' +
+            "BotDefinition but isn't an Agentforce agent that's activated for API access. " +
+            'Check in Setup → Agents that this agent has Status = Active and that the ' +
+            '"Enable Agentforce for your org" setting is turned on.',
+          agentId,
+          hint: 'AGENT_NOT_AGENTFORCE_API_ENABLED',
+        });
+      }
+
+      // Try to extract a JSON error body if SF returned one
+      let parsedErr = rawErr;
+      try {
+        const json = JSON.parse(rawErr);
+        parsedErr = json.message || json.error || json.errorCode || rawErr;
+      } catch { /* leave as raw text */ }
+
+      return res.status(sfRes.status).json({ error: String(parsedErr).slice(0, 500) });
     }
 
     const data = await sfRes.json();

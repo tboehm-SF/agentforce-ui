@@ -38,16 +38,18 @@ export function ContentWorkspace({ onBack, onLogout }: Props) {
   const [hasMore,     setHasMore]     = useState(false);
   const PAGE_SIZE = 20;
 
-  // Marketing Studio agent — good for content queries, tag suggestions, copy ideas
+  // Marketing NBA agent — works with Agent Runtime API. Marketing_Studio_Agent
+  // exists as a legacy Einstein Bot in most orgs and returns HTML 404 from the
+  // Agentforce API, so we route content queries to Marketing NBA instead.
   const assistAgentFallback = useMemo(() => ({
-    name: 'Marketing Studio Agent',
-    developerName: 'Marketing_Studio_Agent',
-    description: 'Query CMS content and generate campaign-ready copy.',
-    icon: '✉️',
+    name: 'Marketing NBA Campaign Agent',
+    developerName: 'Marketing_NBA_Campaign_Agent',
+    description: 'Query content by meaning and get campaign suggestions.',
+    icon: '🎯',
     color: '#dd7a01',
     category: 'Marketing',
   }), []);
-  const assistAgent = useAssistAgent('Marketing_Studio_Agent', assistAgentFallback);
+  const assistAgent = useAssistAgent('Marketing_NBA_Campaign_Agent', assistAgentFallback);
 
   useEffect(() => {
     setLoading(true);

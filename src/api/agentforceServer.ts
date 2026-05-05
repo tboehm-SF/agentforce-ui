@@ -16,10 +16,20 @@ import type { Session } from '../types';
 export async function createServerSession(agentId: string): Promise<Session> {
   const res = await fetch(`/api/agents/${agentId}/sessions`, {
     method: 'POST',
+    credentials: 'include',
   });
   if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Failed to create session: ${res.status} — ${err}`);
+    // Parse JSON error from server (which has already translated SF HTML errors into readable messages)
+    let msg = `Failed to create session (${res.status})`;
+    try {
+      const body = await res.json();
+      if (body?.error) msg = body.error;
+    } catch {
+      // fall back to raw text, truncated to avoid HTML dumps in the UI
+      const txt = await res.text().catch(() => '');
+      if (txt) msg = txt.slice(0, 300);
+    }
+    throw new Error(msg);
   }
   const data = await res.json();
   return { sessionId: data.sessionId, agentId };

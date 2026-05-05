@@ -132,8 +132,22 @@ export function AgentChatPanel({ agent, onClose }: Props) {
         {(isLoading && !isStreaming) && <ThinkingBubble />}
 
         {error && (
-          <div className="glass rounded-xl px-4 py-3 text-sm text-red-300 border border-red-500/20">
-            <span className="font-medium">Error: </span>{error}
+          <div className="glass rounded-xl px-4 py-3 text-sm border"
+            style={{ background: 'rgba(220,90,20,0.08)', borderColor: 'rgba(220,90,20,0.25)', color: 'rgba(255,200,160,0.95)' }}>
+            <div className="flex items-start gap-2">
+              <span className="text-lg shrink-0">⚠️</span>
+              <div className="min-w-0 flex-1">
+                <div className="font-medium text-white/90 mb-1">Agent unavailable</div>
+                <div className="text-white/60 leading-relaxed">{error}</div>
+                <button
+                  onClick={() => clearChat()}
+                  className="mt-2 text-xs px-2.5 py-1 rounded-lg transition-colors hover:bg-white/5"
+                  style={{ border: '1px solid rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.7)' }}
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
