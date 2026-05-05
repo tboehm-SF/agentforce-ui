@@ -54,7 +54,7 @@ app.get('/auth/login', (req, res) => {
     response_type:          'code',
     client_id:              SF_CLIENT_ID,
     redirect_uri:           redirectUri,
-    scope:                  'api chatbot_api',
+    scope:                  'api chatbot_api sfap_api',
     code_challenge:         codeChallenge,
     code_challenge_method:  'S256',
   });
@@ -388,10 +388,8 @@ async function exchangeForAgentJwt(instanceUrl, accessToken) {
 
   if (isHtmlLoginRedirect) {
     throw new Error(
-      'Agent JWT exchange failed — Salesforce returned a login redirect instead of a JWT. ' +
-      "This usually means your Connected App is missing the 'sfap_api' scope (or the 'Manage " +
-      "Agentforce API' OAuth scope). Add it in Setup → App Manager → AgentforceUI → Edit Policies → " +
-      'OAuth Scopes, then sign out and sign in again.'
+      'Your session doesn\'t have Agentforce API permission. Sign out and sign back in to ' +
+      're-approve the app with the updated scopes, then try again.'
     );
   }
 
