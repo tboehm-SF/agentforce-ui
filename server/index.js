@@ -195,17 +195,53 @@ app.get('/api/segments', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/segments/:id', async (req, res) => {
+// Detail lookup — path param is the segment's apiName (NOT marketSegmentId).
+// Returns the segment definition + criteria + a small sample of member records.
+app.get('/api/segments/:apiName', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
   const { accessToken, instanceUrl } = req.session.auth;
+  const { apiName } = req.params;
+  const headers = { Authorization: `Bearer ${accessToken}` };
+
   try {
-    const sfRes = await fetch(
-      `${instanceUrl}/services/data/${SF_API_VERSION}/ssot/segments/${req.params.id}`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    if (!sfRes.ok) { const e = await sfRes.text(); return res.status(sfRes.status).json({ error: e }); }
-    res.json(await sfRes.json());
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    // Fetch definition + members in parallel
+    const [defRes, memRes] = await Promise.all([
+      fetch(`${instanceUrl}/services/data/${SF_API_VERSION}/ssot/segments/${apiName}`, { headers }),
+      fetch(`${instanceUrl}/services/data/${SF_API_VERSION}/ssot/segments/${apiName}/members?limit=5`, { headers }),
+    ]);
+
+    if (!defRes.ok) {
+      const e = await defRes.text();
+      return res.status(defRes.status).json({ error: e.slice(0, 400) });
+    }
+    const defBody = await defRes.json();
+    // /ssot/segments/{apiName} returns { segments: [...] } with one entry
+    const segment = defBody.segments?.[0] || defBody;
+
+    // Parse includeCriteria if it's a stringified JSON blob
+    let parsedCriteria = null;
+    if (typeof segment.includeCriteria === 'string') {
+      try { parsedCriteria = JSON.parse(segment.includeCriteria); } catch { /* keep as raw string */ }
+    }
+
+    // Members: best-effort — may 403 if not published
+    let memberSample = [];
+    let memberCount  = null;
+    if (memRes.ok) {
+      const m = await memRes.json();
+      memberSample = m.data ?? m.members ?? [];
+      memberCount  = m.totalSize ?? m.totalCount ?? null;
+    }
+
+    res.json({
+      segment: { ...segment, parsedCriteria },
+      memberSample,
+      memberCount,
+    });
+  } catch (e) {
+    console.error('[segment detail]', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ─── AI Segment Builder ──────────────────────────────────────────────────────

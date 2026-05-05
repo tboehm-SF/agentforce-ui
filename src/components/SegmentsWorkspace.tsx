@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { AuthState, Segment } from '../types';
 import { SegmentBuilderBar } from './SegmentBuilderBar';
+import { SegmentPreviewPanel } from './SegmentPreviewPanel';
 
 interface Props {
   auth:      AuthState;
@@ -24,6 +25,7 @@ export function SegmentsWorkspace({ onBack, onLogout }: Props) {
   const [totalSize,   setTotalSize]   = useState(0);
   const [page,        setPage]        = useState(0);
   const [refreshKey,  setRefreshKey]  = useState(0);
+  const [selected,    setSelected]    = useState<string | null>(null);
   const PAGE_SIZE = 25;
 
   const loadSegments = useCallback(() => {
@@ -181,7 +183,8 @@ export function SegmentsWorkspace({ onBack, onLogout }: Props) {
                       const status    = STATUS_COLORS[statusKey] ?? DEFAULT_STATUS;
                       return (
                         <tr key={seg.marketSegmentId ?? i}
-                          className="group transition-colors"
+                          onClick={() => seg.apiName && setSelected(seg.apiName)}
+                          className="group transition-colors cursor-pointer"
                           style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}
                           onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(6,165,154,0.05)')}
                           onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}>
@@ -234,6 +237,11 @@ export function SegmentsWorkspace({ onBack, onLogout }: Props) {
           </>
         )}
       </div>
+
+      {/* Segment detail preview drawer */}
+      {selected && (
+        <SegmentPreviewPanel apiName={selected} onClose={() => setSelected(null)} />
+      )}
     </div>
   );
 }
