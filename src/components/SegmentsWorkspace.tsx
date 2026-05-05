@@ -1,7 +1,6 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import type { AuthState, Segment } from '../types';
-import { AiAssistBar } from './AiAssistBar';
-import { useAssistAgent } from '../hooks/useAssistAgent';
+import { SegmentBuilderBar } from './SegmentBuilderBar';
 
 interface Props {
   auth:      AuthState;
@@ -24,20 +23,10 @@ export function SegmentsWorkspace({ onBack, onLogout }: Props) {
   const [search,      setSearch]      = useState('');
   const [totalSize,   setTotalSize]   = useState(0);
   const [page,        setPage]        = useState(0);
+  const [refreshKey,  setRefreshKey]  = useState(0);
   const PAGE_SIZE = 25;
 
-  // Resolve the Marketing NBA agent — used for AI-powered segment strategy chat
-  const assistAgentFallback = useMemo(() => ({
-    name: 'Marketing NBA Campaign Agent',
-    developerName: 'Marketing_NBA_Campaign_Agent',
-    description: 'AI-powered segment strategy and audience recommendations.',
-    icon: '🎯',
-    color: '#06a59a',
-    category: 'Marketing',
-  }), []);
-  const assistAgent = useAssistAgent('Marketing_NBA_Campaign_Agent', assistAgentFallback);
-
-  useEffect(() => {
+  const loadSegments = useCallback(() => {
     setLoading(true);
     setError(null);
     fetch(`/api/segments?page=${page}&pageSize=${PAGE_SIZE}`, { credentials: 'include' })
@@ -55,6 +44,8 @@ export function SegmentsWorkspace({ onBack, onLogout }: Props) {
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, [page]);
+
+  useEffect(() => { loadSegments(); }, [loadSegments, refreshKey]);
 
   const filtered = search
     ? segments.filter(
@@ -126,22 +117,8 @@ export function SegmentsWorkspace({ onBack, onLogout }: Props) {
           </div>
         </div>
 
-        {/* AI assist bar */}
-        {assistAgent && (
-          <AiAssistBar
-            agent={assistAgent}
-            accent="#06a59a"
-            bg="rgba(6,165,154,0.08)"
-            glow="rgba(6,165,154,0.15)"
-            placeholder="Describe the audience you want — e.g. high-value dormant customers in EMEA…"
-            contextPrefix="I'm working in the Segments workspace of a Data Cloud org. Help me with the following segment task:"
-            suggestions={[
-              'Suggest a segment for re-engaging dormant high-value customers',
-              'What segments drive the best email conversion?',
-              'Build criteria for a lookalike of top 10% spenders',
-            ]}
-          />
-        )}
+        {/* AI segment builder: NL → preview → create */}
+        <SegmentBuilderBar onCreated={() => setRefreshKey((k) => k + 1)} />
 
         {/* Loading */}
         {loading && (

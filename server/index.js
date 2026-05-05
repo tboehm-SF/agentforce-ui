@@ -208,6 +208,211 @@ app.get('/api/segments/:id', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── AI Segment Builder ──────────────────────────────────────────────────────
+// Two-step workflow:
+//   POST /api/segments/plan   → LLM drafts a segment spec from NL input (preview)
+//   POST /api/segments/create → creates the segment using a previously approved plan
+//
+// The LLM only outputs a high-level spec (field, operator, value). We synthesize
+// the full SF includeCriteria JSON server-side from a template to avoid LLM
+// hallucination of SF schema details.
+
+const SEGMENT_DMO = 'UnifiedIndividual__dlm';
+
+/** Fetch the DMO field list (cached for 5min). */
+let dmoFieldCache = null;
+async function getUnifiedIndividualFields(accessToken, instanceUrl) {
+  if (dmoFieldCache && Date.now() - dmoFieldCache.at < 5 * 60 * 1000) return dmoFieldCache.fields;
+  const r = await fetch(
+    `${instanceUrl}/services/data/${SF_API_VERSION}/ssot/data-model-objects/${SEGMENT_DMO}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!r.ok) throw new Error(`Failed to load DMO schema: ${r.status}`);
+  const data = await r.json();
+  const fields = (data.fields || []).map((f) => ({ name: f.name, type: f.type, label: f.label }));
+  dmoFieldCache = { at: Date.now(), fields };
+  return fields;
+}
+
+/** Map a friendly operator to SF's enum form. */
+function toSfOperator(op, fieldType) {
+  const o = String(op).toLowerCase().trim();
+  if (['equals', '=', 'is'].includes(o))               return 'equal to';
+  if (['not equals', '!=', 'is not'].includes(o))      return 'not equal to';
+  if (o === 'contains')                                 return 'contains';
+  if (['greater than', '>'].includes(o))                return 'greater than';
+  if (['less than', '<'].includes(o))                   return 'less than';
+  if (['greater or equal', '>='].includes(o))           return 'greater than or equal';
+  if (['less or equal', '<='].includes(o))              return 'less than or equal';
+  if (o === 'before')                                   return 'less than';
+  if (o === 'after')                                    return 'greater than';
+  if (o === 'in')                                       return 'in';
+  // Default: equal to
+  return 'equal to';
+}
+
+function buildIncludeCriteria(filters, dmoFields) {
+  const fieldMap = Object.fromEntries(dmoFields.map((f) => [f.name, f]));
+  const comparisons = filters.map((f) => {
+    const fieldMeta = fieldMap[f.field];
+    if (!fieldMeta) throw new Error(`Unknown field: ${f.field}`);
+    const type        = fieldMeta.type || 'Text';
+    const isNumber    = type === 'Number';
+    const isDate      = type === 'DateTime' || type === 'Date';
+    const compType    = isNumber ? 'NumberComparison' : isDate ? 'DateTimeComparison' : 'TextComparison';
+    const dataType    = isNumber ? 'NUMBER' : isDate ? 'DATE_TIME' : 'TEXT';
+    return {
+      type: compType,
+      path: null,
+      joinPath: null,
+      subject: { objectApiName: SEGMENT_DMO, fieldApiName: f.field },
+      selfReference: false,
+      operator: toSfOperator(f.operator, type),
+      businessTypeArgument: null,
+      subjectFieldDataType: dataType,
+      subjectFieldBusinessType: dataType,
+      subjectFieldSourceType: 'DIRECT',
+      value: isNumber ? Number(f.value) : f.value,
+    };
+  });
+  return {
+    filter: {
+      type: 'LogicalComparison',
+      operator: 'and',
+      filters: comparisons,
+    },
+    containerObjectApiName: SEGMENT_DMO,
+    path: [],
+    joinPath: [],
+  };
+}
+
+/** Call the Einstein LLM Gateway on api.salesforce.com. */
+async function callEinsteinLlm(jwt, prompt) {
+  const r = await fetch(
+    'https://api.salesforce.com/einstein/platform/v1/models/sfdc_ai__DefaultGPT4Omni/generations',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+        'Content-Type': 'application/json',
+        'x-client-feature-id': 'EinsteinGptForDevelopers',
+      },
+      body: JSON.stringify({ prompt }),
+    }
+  );
+  if (!r.ok) {
+    const err = await r.text();
+    throw new Error(`LLM request failed (${r.status}): ${err.slice(0, 300)}`);
+  }
+  const data = await r.json();
+  return data.generation?.generatedText || '';
+}
+
+app.post('/api/segments/plan', async (req, res) => {
+  if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
+  const { accessToken, instanceUrl } = req.session.auth;
+  const { description } = req.body || {};
+  if (!description?.trim()) return res.status(400).json({ error: 'Missing description' });
+
+  try {
+    const fields = await getUnifiedIndividualFields(accessToken, instanceUrl);
+    const jwt    = await exchangeForAgentJwt(instanceUrl, accessToken);
+
+    const fieldList = fields
+      .map((f) => `  ${f.name} (${f.type}) — ${f.label}`)
+      .join('\n');
+
+    const prompt =
+      'You are a segment builder for Salesforce Data Cloud. The target object is ' +
+      `${SEGMENT_DMO} which has these fields:\n${fieldList}\n\n` +
+      'Given the natural-language description below, output ONLY a JSON object (no markdown ' +
+      'fences, no commentary) with this exact shape:\n' +
+      '{\n' +
+      '  "name": "<snake_case API name, max 30 chars, ASCII only>",\n' +
+      '  "displayName": "<Title Case display name, max 60 chars>",\n' +
+      '  "description": "<one-line summary>",\n' +
+      '  "filters": [\n' +
+      '    {"field": "<field api name from list>", "operator": "<equals|not equals|contains|greater than|less than|before|after>", "value": "<string>"}\n' +
+      '  ]\n' +
+      '}\n\n' +
+      `Description: ${description}`;
+
+    const raw = await callEinsteinLlm(jwt, prompt);
+    // Strip markdown fences if any
+    const cleaned = raw.replace(/^```(json)?\s*/i, '').replace(/```\s*$/, '').trim();
+    let plan;
+    try { plan = JSON.parse(cleaned); }
+    catch {
+      return res.status(422).json({ error: 'LLM did not return valid JSON', raw });
+    }
+    // Validate fields exist
+    const validFieldNames = new Set(fields.map((f) => f.name));
+    const unknownFields = (plan.filters || [])
+      .map((f) => f.field).filter((f) => !validFieldNames.has(f));
+    if (unknownFields.length) {
+      return res.status(422).json({
+        error: `LLM referenced unknown field(s): ${unknownFields.join(', ')}. Try rephrasing.`,
+        raw,
+      });
+    }
+    res.json({ plan, fields: fields.slice(0, 20) });
+  } catch (e) {
+    console.error('[segment plan]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/segments/create', async (req, res) => {
+  if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
+  const { accessToken, instanceUrl } = req.session.auth;
+  const { plan } = req.body || {};
+  if (!plan?.name || !Array.isArray(plan.filters) || !plan.filters.length) {
+    return res.status(400).json({ error: 'Missing plan or filters' });
+  }
+
+  try {
+    const fields = await getUnifiedIndividualFields(accessToken, instanceUrl);
+    const includeCriteria = buildIncludeCriteria(plan.filters, fields);
+
+    // Truncate/sanitize name to meet SF constraints
+    const apiName = String(plan.name).replace(/[^A-Za-z0-9_]/g, '_').slice(0, 30);
+
+    const body = {
+      displayName: plan.displayName || apiName.replace(/_/g, ' '),
+      apiName,
+      description: plan.description || '',
+      dataSpaceName: 'default',
+      includeCriteria: JSON.stringify(includeCriteria),
+      segmentOnObjectApiName: SEGMENT_DMO,
+      publishSchedule: { interval: 'NONE' },
+    };
+
+    const r = await fetch(
+      `${instanceUrl}/services/data/${SF_API_VERSION}/ssot/segments`,
+      {
+        method:  'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      }
+    );
+    const respText = await r.text();
+    if (!r.ok) {
+      console.error('[segment create] SF error:', r.status, respText.slice(0, 500));
+      return res.status(r.status).json({ error: `Create failed (${r.status}): ${respText.slice(0, 400)}` });
+    }
+    let created;
+    try { created = JSON.parse(respText); } catch { created = { raw: respText }; }
+    res.json({ segment: created });
+  } catch (e) {
+    console.error('[segment create]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── Campaigns API (via BotDefinition agent query) ────────────────────────────
 // Returns the list of marketing-category agents to act as the "campaigns" entry point
 
