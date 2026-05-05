@@ -369,17 +369,48 @@ async function exchangeForAgentJwt(instanceUrl, accessToken) {
   const url = `${instanceUrl}/agentforce/bootstrap/nameduser`;
   const r = await fetch(url, {
     method: 'GET',
-    headers: { Cookie: `sid=${accessToken}`, 'Content-Type': 'application/json' },
+    headers: {
+      Cookie: `sid=${accessToken}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    redirect: 'manual', // don't follow the login redirect — we want to detect it
   });
-  if (!r.ok) {
-    const body = await r.text();
+
+  const contentType = r.headers.get('content-type') || '';
+  const body        = await r.text();
+
+  // Detect login-redirect HTML page — the most common failure mode
+  const isHtmlLoginRedirect =
+    contentType.includes('text/html') ||
+    body.trim().startsWith('<!DOCTYPE') ||
+    body.trim().startsWith('<html');
+
+  if (isHtmlLoginRedirect) {
     throw new Error(
-      `Agent JWT exchange failed (${r.status}). Ensure the Connected App has scope ` +
-      `'chatbot_api' + 'api' and Agentforce is enabled on the org. Body: ${body.slice(0, 200)}`
+      'Agent JWT exchange failed — Salesforce returned a login redirect instead of a JWT. ' +
+      "This usually means your Connected App is missing the 'sfap_api' scope (or the 'Manage " +
+      "Agentforce API' OAuth scope). Add it in Setup → App Manager → AgentforceUI → Edit Policies → " +
+      'OAuth Scopes, then sign out and sign in again.'
     );
   }
-  const data = await r.json();
-  if (!data.access_token) throw new Error(`JWT exchange returned no access_token: ${JSON.stringify(data).slice(0, 200)}`);
+
+  if (!r.ok) {
+    throw new Error(
+      `Agent JWT exchange failed (HTTP ${r.status}). ` +
+      `Body: ${body.slice(0, 200)}`
+    );
+  }
+
+  let data;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    throw new Error(`Agent JWT exchange returned non-JSON body: ${body.slice(0, 200)}`);
+  }
+  if (!data.access_token) {
+    throw new Error(`JWT exchange returned no access_token: ${JSON.stringify(data).slice(0, 200)}`);
+  }
   return data.access_token;
 }
 
