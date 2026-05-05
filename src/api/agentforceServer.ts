@@ -39,7 +39,7 @@ export async function createServerSession(agentId: string): Promise<Session> {
  * Ask the server to end a session.
  */
 export async function deleteServerSession(sessionId: string): Promise<void> {
-  await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+  await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE', credentials: 'include' });
 }
 
 /**
@@ -55,13 +55,21 @@ export async function sendServerMessageStreaming(
   try {
     const res = await fetch(`/api/sessions/${sessionId}/messages`, {
       method:  'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ message }),
     });
 
     if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`Message failed: ${res.status} — ${err}`);
+      let msg = `Message failed (${res.status})`;
+      try {
+        const body = await res.json();
+        if (body?.error) msg = body.error;
+      } catch {
+        const txt = await res.text().catch(() => '');
+        if (txt) msg = txt.slice(0, 300);
+      }
+      throw new Error(msg);
     }
 
     const reader  = res.body?.getReader();

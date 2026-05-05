@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState } from 'react';
 import type { Agent } from '../types';
 import { AgentChatPanel } from './AgentChatPanel';
 
@@ -29,7 +29,6 @@ export function AiAssistBar({
   const [input,  setInput]  = useState('');
   const [open,   setOpen]   = useState(false);
   const [seeded, setSeeded] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
 
   function submit(text: string) {
     const finalText = contextPrefix ? `${contextPrefix}\n\n${text}` : text;
@@ -63,7 +62,6 @@ export function AiAssistBar({
 
         <div className="flex items-center gap-2">
           <input
-            ref={inputRef}
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -105,12 +103,12 @@ export function AiAssistBar({
         )}
       </div>
 
-      {/* Chat drawer */}
+      {/* Chat drawer — AgentChatPanel auto-sends the seed prompt via its seedPrompt prop */}
       {open && (
         <div className="fixed inset-0 z-50 flex" style={{ background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)' }}>
           <div className="flex-1" onClick={() => setOpen(false)} />
           <div className="w-full max-w-xl h-full">
-            <SeededChat
+            <AgentChatPanel
               agent={agent}
               seedPrompt={seeded}
               onClose={() => { setOpen(false); setSeeded(null); }}
@@ -119,46 +117,5 @@ export function AiAssistBar({
         </div>
       )}
     </>
-  );
-}
-
-/**
- * Wraps AgentChatPanel to auto-submit a seed prompt when the panel opens.
- * We use a trick: render AgentChatPanel, then dispatch a DOM event-like
- * bootstrap by programmatically firing sendMessage via the textarea.
- *
- * Simpler approach: render AgentChatPanel normally and forward seedPrompt
- * through a global-event handshake. Cleanest = pass as a prop, but
- * AgentChatPanel doesn't accept one — so we use an effect that types into
- * its textarea and submits.
- */
-function SeededChat({ agent, seedPrompt, onClose }: {
-  agent: Agent; seedPrompt: string | null; onClose: () => void;
-}) {
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!seedPrompt) return;
-    // Wait for AgentChatPanel to mount its textarea
-    const t = setTimeout(() => {
-      const ta = rootRef.current?.querySelector('textarea') as HTMLTextAreaElement | null;
-      const btn = rootRef.current?.querySelector('button[class*="rounded-xl"]') as HTMLButtonElement | null;
-      if (ta) {
-        // Use the native input-value setter so React's synthetic event fires
-        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
-        setter?.call(ta, seedPrompt);
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
-        // Then submit via Enter key
-        ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-        btn?.focus();
-      }
-    }, 120);
-    return () => clearTimeout(t);
-  }, [seedPrompt]);
-
-  return (
-    <div ref={rootRef} className="h-full">
-      <AgentChatPanel agent={agent} onClose={onClose} />
-    </div>
   );
 }

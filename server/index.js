@@ -266,7 +266,7 @@ app.get('/api/content', async (req, res) => {
     const type = req.query.type || '';
     const page = parseInt(req.query.page || '0', 10);
     const pageSize = parseInt(req.query.pageSize || '20', 10);
-    let url = `${instanceUrl}/services/data/v62.0/connect/cms/contents?page=${page}&pageSize=${pageSize}`;
+    let url = `${instanceUrl}/services/data/${SF_API_VERSION}/connect/cms/contents?page=${page}&pageSize=${pageSize}`;
     if (type) url += `&managedContentType=${encodeURIComponent(type)}`;
     const sfRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
     if (!sfRes.ok) { const e = await sfRes.text(); return res.status(sfRes.status).json({ error: e }); }

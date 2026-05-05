@@ -5,6 +5,8 @@ import { useAgentChat } from '../hooks/useAgentChat';
 interface Props {
   agent: Agent;
   onClose: () => void;
+  /** Optional prompt to auto-send as the first message when the panel mounts. */
+  seedPrompt?: string | null;
 }
 
 const CATEGORY_COLORS: Record<string, { accent: string; bg: string; glow: string }> = {
@@ -14,10 +16,11 @@ const CATEGORY_COLORS: Record<string, { accent: string; bg: string; glow: string
   Productivity:{ accent: '#dd7a01', bg: 'rgba(221,122,1,0.12)',   glow: 'rgba(221,122,1,0.2)' },
 };
 
-export function AgentChatPanel({ agent, onClose }: Props) {
+export function AgentChatPanel({ agent, onClose, seedPrompt }: Props) {
   const [input, setInput] = useState('');
   const bottomRef    = useRef<HTMLDivElement>(null);
   const textareaRef  = useRef<HTMLTextAreaElement>(null);
+  const seededRef    = useRef(false);
   const colors = CATEGORY_COLORS[agent.category] ?? CATEGORY_COLORS.Marketing;
 
   const {
@@ -33,6 +36,15 @@ export function AgentChatPanel({ agent, onClose }: Props) {
   useEffect(() => {
     textareaRef.current?.focus();
   }, [agent.id]);
+
+  // Auto-send seed prompt exactly once (when chat is empty and not already busy)
+  useEffect(() => {
+    if (!seedPrompt || seededRef.current) return;
+    if (isLoading || isStreaming) return;
+    if (messages.length > 0) return;
+    seededRef.current = true;
+    sendMessage(seedPrompt);
+  }, [seedPrompt, isLoading, isStreaming, messages.length, sendMessage]);
 
   function handleSubmit() {
     if (!input.trim() || isLoading || isStreaming) return;
