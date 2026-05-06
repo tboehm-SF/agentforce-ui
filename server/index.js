@@ -138,6 +138,59 @@ app.get('/api/auth/me', (req, res) => {
   res.json({ authenticated: true, username, displayName, instanceUrl });
 });
 
+// Diagnostic — returns whether each downstream API is reachable with the
+// current session. Helps debug "I get logged in but nothing loads" issues.
+app.get('/api/auth/diagnose', async (req, res) => {
+  if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
+  const { accessToken, instanceUrl } = req.session.auth;
+  const results = {};
+
+  async function probe(label, url, init = {}) {
+    try {
+      const r = await fetch(url, {
+        ...init,
+        headers: { Authorization: `Bearer ${accessToken}`, ...(init.headers || {}) },
+      });
+      const text = await r.text();
+      let body;
+      try { body = JSON.parse(text); } catch { body = text.slice(0, 200); }
+      results[label] = {
+        status: r.status,
+        ok:     r.ok,
+        body:   typeof body === 'object' ? JSON.stringify(body).slice(0, 300) : body,
+      };
+    } catch (e) {
+      results[label] = { error: e.message };
+    }
+  }
+
+  // Identify token scopes via SF userinfo
+  await probe('userinfo', `${instanceUrl}/services/oauth2/userinfo`);
+  // Test segments
+  await probe('segments_list', `${instanceUrl}/services/data/${SF_API_VERSION}/ssot/segments?offset=0&batchSize=1`);
+  await probe('campaign_query', `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent('SELECT Id FROM Campaign LIMIT 1')}`);
+  await probe('cms_query', `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent("SELECT Id FROM ManagedContent WHERE AuthoredManagedContentSpaceId='" + (process.env.CMS_WORKSPACE_ID || '0Zug7000000GnsoCAC') + "' LIMIT 1")}`);
+  // Test JWT exchange (uses Cookie auth, NOT Bearer)
+  try {
+    const r = await fetch(`${instanceUrl}/agentforce/bootstrap/nameduser`, {
+      headers: { Cookie: `sid=${accessToken}` },
+      redirect: 'manual',
+    });
+    const ct = r.headers.get('content-type') || '';
+    const text = await r.text();
+    results.jwt_bootstrap = {
+      status: r.status,
+      contentType: ct,
+      isJson: ct.includes('application/json'),
+      preview: text.slice(0, 100),
+    };
+  } catch (e) {
+    results.jwt_bootstrap = { error: e.message };
+  }
+
+  res.json({ instanceUrl, results });
+});
+
 // Step 4: Fetch org agents using the session token — include Id (record ID needed for Agent API)
 // CRITICAL: Only AgentforceServiceAgent types work with /einstein/ai-agent/v1/.
 // Legacy EinsteinServiceAgent / MyDomainChatbot / ExternalCopilot return HTML 404s.
