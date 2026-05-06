@@ -242,10 +242,25 @@ app.get('/api/segments', async (req, res) => {
     const pageSize = parseInt(req.query.pageSize || '25', 10);
     const url = `${instanceUrl}/services/data/${SF_API_VERSION}/ssot/segments?offset=${page * pageSize}&batchSize=${pageSize}`;
     const sfRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-    if (!sfRes.ok) { const e = await sfRes.text(); return res.status(sfRes.status).json({ error: e }); }
+    if (!sfRes.ok) {
+      const errText = await sfRes.text();
+      console.error('[/api/segments] SF error:', sfRes.status, errText.slice(0, 400));
+      let errMsg = errText;
+      try {
+        const parsed = JSON.parse(errText);
+        errMsg = Array.isArray(parsed) ? parsed[0]?.message || parsed[0]?.errorCode || errText : (parsed.message || parsed.error || errText);
+      } catch { /* keep raw */ }
+      return res.status(sfRes.status).json({
+        error: `Couldn't load segments (${sfRes.status}): ${String(errMsg).slice(0, 300)}`,
+        hint: sfRes.status === 403 ? 'User may need cdp_api / cdp_profile_api OAuth scope or Data Cloud admin perm set.' : undefined,
+      });
+    }
     const data = await sfRes.json();
     res.json({ segments: data.segments ?? [], totalSize: data.totalSize ?? data.count ?? 0 });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[/api/segments]', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Detail lookup — path param is the segment's apiName (NOT marketSegmentId).
@@ -264,8 +279,14 @@ app.get('/api/segments/:apiName', async (req, res) => {
     ]);
 
     if (!defRes.ok) {
-      const e = await defRes.text();
-      return res.status(defRes.status).json({ error: e.slice(0, 400) });
+      const errText = await defRes.text();
+      console.error('[/api/segments/:apiName] SF error:', defRes.status, errText.slice(0, 400));
+      let errMsg = errText;
+      try {
+        const parsed = JSON.parse(errText);
+        errMsg = Array.isArray(parsed) ? parsed[0]?.message || parsed[0]?.errorCode || errText : (parsed.message || parsed.error || errText);
+      } catch { /* keep raw */ }
+      return res.status(defRes.status).json({ error: `Detail failed (${defRes.status}): ${String(errMsg).slice(0, 300)}` });
     }
     const defBody = await defRes.json();
     // /ssot/segments/{apiName} returns { segments: [...] } with one entry
@@ -545,10 +566,22 @@ app.get('/api/campaigns/records', async (req, res) => {
                FROM Campaign ORDER BY StartDate DESC NULLS LAST LIMIT 50`;
     const url = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(q.replace(/\s+/g, ' '))}`;
     const sfRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-    if (!sfRes.ok) { const e = await sfRes.text(); return res.status(sfRes.status).json({ error: e }); }
+    if (!sfRes.ok) {
+      const errText = await sfRes.text();
+      console.error('[/api/campaigns/records] SF error:', sfRes.status, errText.slice(0, 400));
+      let errMsg = errText;
+      try {
+        const parsed = JSON.parse(errText);
+        errMsg = Array.isArray(parsed) ? parsed[0]?.message || errText : (parsed.message || errText);
+      } catch { /* keep raw */ }
+      return res.status(sfRes.status).json({ error: `Campaigns failed (${sfRes.status}): ${String(errMsg).slice(0, 300)}` });
+    }
     const data = await sfRes.json();
     res.json({ campaigns: data.records ?? [], totalSize: data.totalSize ?? 0 });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[/api/campaigns/records]', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ─── Content API (Salesforce CMS Workspace "Default_Content_Workspace") ──────
@@ -587,7 +620,19 @@ app.get('/api/content', async (req, res) => {
       `ORDER BY LastModifiedDate DESC LIMIT 200`;
     const qUrl = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(q)}`;
     const qRes = await fetch(qUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
-    if (!qRes.ok) { const e = await qRes.text(); return res.status(qRes.status).json({ error: e }); }
+    if (!qRes.ok) {
+      const errText = await qRes.text();
+      console.error('[/api/content] SF SOQL error:', qRes.status, errText.slice(0, 400));
+      let errMsg = errText;
+      try {
+        const parsed = JSON.parse(errText);
+        errMsg = Array.isArray(parsed) ? parsed[0]?.message || parsed[0]?.errorCode || errText : (parsed.message || parsed.error || errText);
+      } catch { /* keep raw */ }
+      return res.status(qRes.status).json({
+        error: `Couldn't load content (${qRes.status}): ${String(errMsg).slice(0, 300)}`,
+        hint: qRes.status === 400 ? 'CMS_WORKSPACE_ID may be invalid or user lacks ManagedContent read.' : undefined,
+      });
+    }
     const { records = [], totalSize = 0 } = await qRes.json();
 
     // 2. Paginate to the requested window
