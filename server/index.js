@@ -54,7 +54,7 @@ app.get('/auth/login', (req, res) => {
     response_type:          'code',
     client_id:              SF_CLIENT_ID,
     redirect_uri:           redirectUri,
-    scope:                  'api chatbot_api sfap_api',
+    scope:                  'api chatbot_api',
     code_challenge:         codeChallenge,
     code_challenge_method:  'S256',
   });
