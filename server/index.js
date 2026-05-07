@@ -41,15 +41,12 @@ app.use(cookieSession({
   path:     '/',
 }));
 
-// cookie-session lacks the .save() method that express-session has,
-// because there's no async store to wait on. We add a no-op shim so
-// existing call sites work unchanged.
-app.use((req, res, next) => {
-  if (req.session && typeof req.session.save !== 'function') {
-    req.session.save = (cb) => cb && cb();
-  }
-  next();
-});
+// cookie-session writes the cookie synchronously during res.writeHead(),
+// so there is no async save() to call. Express-session's req.session.save()
+// is intentionally NOT shimmed here — adding a function property to the
+// session object would make cookie-session see the session as 'changed'
+// before any real data was set, which can cause subtle write-ordering
+// bugs. Just modify req.session.* and call res.redirect() / res.json().
 
 // ─── OAuth: Authorization Code + PKCE flow (no client secret needed) ─────────
 
@@ -86,15 +83,10 @@ app.get('/auth/login', (req, res) => {
     code_challenge:         codeChallenge,
     code_challenge_method:  'S256',
   });
-  // Explicitly save the session before redirecting — async store writes can
-  // otherwise race the redirect, leaving the PKCE verifier missing on callback.
-  req.session.save((err) => {
-    if (err) {
-      console.error('[auth/login] session save error:', err);
-      return res.redirect('/?auth_error=session_save_failed');
-    }
-    res.redirect(`${SF_BASE_URL}/services/oauth2/authorize?${params}`);
-  });
+  // cookie-session writes synchronously during res.writeHead() — no
+  // explicit save needed. The PKCE verifier we just put on req.session
+  // will be encoded into the Set-Cookie header before this redirect ships.
+  res.redirect(`${SF_BASE_URL}/services/oauth2/authorize?${params}`);
 });
 
 // Step 2: SF sends ?code=... back — exchange using PKCE verifier (no secret)
@@ -159,19 +151,20 @@ app.get('/auth/callback', async (req, res) => {
       displayName:    identity.name || '',
     };
 
-    console.log('[auth/callback] session stored for', req.session.auth.username);
+    // Diagnostic: log the cookie size we're about to send. cookie-session
+    // serializes JSON → base64 → cookies.set, and browsers cap individual
+    // cookies at ~4096 bytes. If the access token is unusually long, the
+    // cookie can exceed this and silently get dropped by the browser.
+    const sessSize = Buffer.byteLength(JSON.stringify(req.session));
+    console.log('[auth/callback] session stored for', req.session.auth.username,
+                '— payload size:', sessSize, 'bytes (token len:', tokenData.access_token.length, ')');
 
-    // Explicitly persist the session before sending the redirect, otherwise
-    // the next request (React app loading) may run before the session store
-    // has finished writing — leaving the user effectively unauthenticated.
-    req.session.save((err) => {
-      if (err) {
-        console.error('[auth/callback] session save error:', err);
-        return res.redirect(`/?auth_error=session_save_failed`);
-      }
-      // Send user to the React app — no tokens in the URL
-      res.redirect('/?auth=ok');
-    });
+    if (sessSize > 3500) {
+      console.warn('[auth/callback] WARNING: session payload near 4KB cookie limit — browser may drop it.');
+    }
+
+    // cookie-session writes synchronously during res.writeHead(). No save() needed.
+    res.redirect('/?auth=ok');
   } catch (e) {
     console.error('[auth/callback] exception:', e.message);
     res.redirect(`/?auth_error=${encodeURIComponent(e.message)}`);
