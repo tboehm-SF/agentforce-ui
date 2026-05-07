@@ -26,14 +26,18 @@ app.set('trust proxy', 1); // Required behind Heroku's proxy for secure cookies
 // scales to N dynos, requires zero infrastructure.
 app.use(cookieSession({
   name:     'agentforce_sess',
-  // Two keys allow rotation: SF rotates by setting SESSION_SECRET to a
-  // new value while keeping the old one as the second key for a grace
-  // period. We use just the active secret here.
   keys:     [SESSION_SECRET],
   maxAge:   365 * 24 * 60 * 60 * 1000, // 365 days
   secure:   isProd,
   httpOnly: true,
-  sameSite: 'lax', // OAuth callback is a top-level redirect from salesforce.com
+  // 'none' is required because:
+  //   1. herokuapp.com is on the Public Suffix List (each <app>.herokuapp.com
+  //      is its own eTLD+1), so cookie-jar isolation is strict.
+  //   2. The OAuth flow redirects salesforce.com → herokuapp.com — Safari ITP
+  //      and Firefox strict mode treat this as cross-site. With sameSite=lax
+  //      the cookie can drop on the redirect from SF.
+  // 'none' + secure + httpOnly + signed = safe.
+  sameSite: isProd ? 'none' : 'lax',
   path:     '/',
 }));
 
@@ -191,11 +195,15 @@ app.get('/api/auth/diagnose', async (req, res) => {
     authPresent:      !!req.session?.auth,
     storeType:        'cookie (stateless, signed)',
     cookieMaxAgeDays: 365,
+    cookieSameSite:   isProd ? 'none' : 'lax',
+    cookieSecure:     isProd,
     nodeEnv:          process.env.NODE_ENV,
     headerXFwdProto:  req.headers['x-forwarded-proto'],
     reqProtocol:      req.protocol,
     host:             req.get('host'),
     cookieReceived:   !!(req.headers.cookie && req.headers.cookie.includes('agentforce_sess')),
+    rawCookieHeader:  (req.headers.cookie || '(none)').slice(0, 200),
+    userAgentHint:    (req.headers['user-agent'] || '').slice(0, 100),
   };
 
   if (!req.session?.auth) {
