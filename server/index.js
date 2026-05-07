@@ -140,10 +140,32 @@ app.get('/api/auth/me', (req, res) => {
 
 // Diagnostic — returns whether each downstream API is reachable with the
 // current session. Helps debug "I get logged in but nothing loads" issues.
+// Auth-optional: returns session state info even when not signed in so we
+// can distinguish "no session" from "session exists but APIs fail".
 app.get('/api/auth/diagnose', async (req, res) => {
-  if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
-  const { accessToken, instanceUrl } = req.session.auth;
+  const sessionInfo = {
+    sessionExists:    !!req.session,
+    authPresent:      !!req.session?.auth,
+    sessionId:        req.sessionID ? req.sessionID.slice(0, 8) + '…' : null,
+    cookieMaxAge:     req.session?.cookie?.maxAge,
+    cookieSecure:     req.session?.cookie?.secure,
+    cookieHttpOnly:   req.session?.cookie?.httpOnly,
+  };
+
+  if (!req.session?.auth) {
+    return res.status(200).json({
+      ok: false,
+      reason: 'No active session — log in first.',
+      sessionInfo,
+      hint:
+        'Open https://martech-headless360-ui-6c8de6064bbd.herokuapp.com/ in the same browser tab, ' +
+        'click Sign in, complete OAuth, then come back to /api/auth/diagnose.',
+    });
+  }
+
+  const { accessToken, instanceUrl, username } = req.session.auth;
   const results = {};
+  results.session = { ...sessionInfo, username, instanceUrl, accessTokenPrefix: accessToken.slice(0, 30) + '…' };
 
   async function probe(label, url, init = {}) {
     try {
