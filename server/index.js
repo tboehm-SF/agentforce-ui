@@ -64,6 +64,19 @@ function publicBaseUrl(req) {
   return `${proto}://${req.get('host')}`;
 }
 
+// Force-clear all session cookies and start a fresh login. Useful when the
+// client has a stale cookie that the OAuth flow can't overwrite.
+app.get('/auth/reset', (req, res) => {
+  // Aggressively expire any cookies the browser might have for our session.
+  for (const name of ['agentforce_sess', 'agentforce_sess.sig']) {
+    res.clearCookie(name, { path: '/', secure: isProd, sameSite: isProd ? 'none' : 'lax', httpOnly: true });
+    res.cookie(name, '', { path: '/', expires: new Date(0), secure: isProd, sameSite: isProd ? 'none' : 'lax', httpOnly: true });
+  }
+  // Then nuke any in-flight session and start fresh
+  req.session = null;
+  res.redirect('/auth/login');
+});
+
 // Step 1: Generate PKCE verifier+challenge, store in session, redirect to SF
 app.get('/auth/login', (req, res) => {
   const codeVerifier  = base64url(crypto.randomBytes(32));
@@ -183,6 +196,23 @@ app.get('/api/auth/me', (req, res) => {
 // Auth-optional: returns session state info even when not signed in so we
 // can distinguish "no session" from "session exists but APIs fail".
 app.get('/api/auth/diagnose', async (req, res) => {
+  // Decode the cookie payload manually so we can see what's actually inside
+  // (cookie-session uses base64-encoded JSON, no encryption — only signed).
+  let decodedSession = null;
+  try {
+    const m = (req.headers.cookie || '').match(/agentforce_sess=([^;]+)/);
+    if (m) {
+      const decoded = Buffer.from(decodeURIComponent(m[1]), 'base64').toString('utf8');
+      decodedSession = JSON.parse(decoded);
+      // Truncate accessToken for safety in the diagnostic output
+      if (decodedSession?.auth?.accessToken) {
+        decodedSession.auth.accessToken = decodedSession.auth.accessToken.slice(0, 25) + '… (' + decodedSession.auth.accessToken.length + ' chars)';
+      }
+    }
+  } catch (e) {
+    decodedSession = { decodeError: e.message };
+  }
+
   const sessionInfo = {
     sessionExists:    !!req.session,
     authPresent:      !!req.session?.auth,
@@ -195,7 +225,9 @@ app.get('/api/auth/diagnose', async (req, res) => {
     reqProtocol:      req.protocol,
     host:             req.get('host'),
     cookieReceived:   !!(req.headers.cookie && req.headers.cookie.includes('agentforce_sess')),
-    rawCookieHeader:  (req.headers.cookie || '(none)').slice(0, 200),
+    rawCookieHeader:  (req.headers.cookie || '(none)').slice(0, 250),
+    cookieKeysInPayload: decodedSession && typeof decodedSession === 'object' ? Object.keys(decodedSession) : [],
+    decodedSession,
     userAgentHint:    (req.headers['user-agent'] || '').slice(0, 100),
   };
 
