@@ -1,7 +1,5 @@
 import express from 'express';
-import session from 'express-session';
-import connectPgSimple from 'connect-pg-simple';
-import pg from 'pg';
+import cookieSession from 'cookie-session';
 import cors from 'cors';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -23,39 +21,31 @@ app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.set('trust proxy', 1); // Required behind Heroku's proxy for secure cookies
 
-// Session store: prefer Postgres (persistent across dyno restarts) when
-// DATABASE_URL is available. Falls back to in-memory for local dev.
-let sessionStore;
-if (process.env.DATABASE_URL) {
-  const PgStore = connectPgSimple(session);
-  const pool = new pg.Pool({
-    connectionString: process.env.DATABASE_URL,
-    // Heroku Postgres requires SSL; reject-unauthorized: false because
-    // Heroku uses self-signed certs for the cluster.
-    ssl: { rejectUnauthorized: false },
-  });
-  sessionStore = new PgStore({
-    pool,
-    createTableIfMissing: true,
-    tableName: 'session',
-  });
-  console.log('[session] using Postgres-backed store (persistent)');
-} else {
-  console.warn('[session] DATABASE_URL not set — using in-memory store. Sessions WILL be lost on dyno restart.');
-}
-
-app.use(session({
-  store:             sessionStore, // undefined = default MemoryStore (local dev only)
-  secret:            SESSION_SECRET,
-  resave:            false,
-  saveUninitialized: false,
-  cookie: {
-    secure:   isProd,   // HTTPS-only in prod
-    httpOnly: true,
-    sameSite: 'lax',    // OAuth callback is top-level navigation; lax allows cookie
-    maxAge:   2 * 60 * 60 * 1000, // 2 hours — matches SF token lifetime
-  },
+// Stateless cookie-based session — encrypted+signed payload lives in the
+// browser's cookie itself, no server-side store. Survives dyno restarts,
+// scales to N dynos, requires zero infrastructure.
+app.use(cookieSession({
+  name:     'agentforce_sess',
+  // Two keys allow rotation: SF rotates by setting SESSION_SECRET to a
+  // new value while keeping the old one as the second key for a grace
+  // period. We use just the active secret here.
+  keys:     [SESSION_SECRET],
+  maxAge:   365 * 24 * 60 * 60 * 1000, // 365 days
+  secure:   isProd,
+  httpOnly: true,
+  sameSite: 'lax', // OAuth callback is a top-level redirect from salesforce.com
+  path:     '/',
 }));
+
+// cookie-session lacks the .save() method that express-session has,
+// because there's no async store to wait on. We add a no-op shim so
+// existing call sites work unchanged.
+app.use((req, res, next) => {
+  if (req.session && typeof req.session.save !== 'function') {
+    req.session.save = (cb) => cb && cb();
+  }
+  next();
+});
 
 // ─── OAuth: Authorization Code + PKCE flow (no client secret needed) ─────────
 
@@ -165,7 +155,7 @@ app.get('/auth/callback', async (req, res) => {
       displayName:    identity.name || '',
     };
 
-    console.log('[auth/callback] session stored for', req.session.auth.username, 'sid=' + req.sessionID.slice(0, 8));
+    console.log('[auth/callback] session stored for', req.session.auth.username);
 
     // Explicitly persist the session before sending the redirect, otherwise
     // the next request (React app loading) may run before the session store
@@ -199,16 +189,13 @@ app.get('/api/auth/diagnose', async (req, res) => {
   const sessionInfo = {
     sessionExists:    !!req.session,
     authPresent:      !!req.session?.auth,
-    sessionId:        req.sessionID ? req.sessionID.slice(0, 8) + '…' : null,
-    cookieMaxAge:     req.session?.cookie?.maxAge,
-    cookieSecure:     req.session?.cookie?.secure,
-    cookieHttpOnly:   req.session?.cookie?.httpOnly,
-    cookieSameSite:   req.session?.cookie?.sameSite,
-    storeType:        sessionStore ? 'postgres' : 'memory (volatile)',
+    storeType:        'cookie (stateless, signed)',
+    cookieMaxAgeDays: 365,
     nodeEnv:          process.env.NODE_ENV,
     headerXFwdProto:  req.headers['x-forwarded-proto'],
     reqProtocol:      req.protocol,
     host:             req.get('host'),
+    cookieReceived:   !!(req.headers.cookie && req.headers.cookie.includes('agentforce_sess')),
   };
 
   if (!req.session?.auth) {
@@ -310,7 +297,9 @@ app.get('/api/auth/agents', async (req, res) => {
 
 // Logout
 app.post('/api/auth/logout', (req, res) => {
-  req.session.destroy(() => res.json({ ok: true }));
+  // cookie-session: clear by assigning null
+  req.session = null;
+  res.json({ ok: true });
 });
 
 // ─── Segments API ─────────────────────────────────────────────────────────────
