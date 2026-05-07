@@ -39,6 +39,15 @@ function base64url(buf) {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 }
 
+// Helper — build the public-facing URL behind Heroku's HTTPS proxy.
+// Heroku terminates TLS at the load balancer, so req.protocol inside the
+// dyno is 'http'. trust proxy + X-Forwarded-Proto fixes that, but we also
+// belt-and-braces force https in production explicitly.
+function publicBaseUrl(req) {
+  const proto = isProd ? 'https' : (req.headers['x-forwarded-proto'] || req.protocol || 'http');
+  return `${proto}://${req.get('host')}`;
+}
+
 // Step 1: Generate PKCE verifier+challenge, store in session, redirect to SF
 app.get('/auth/login', (req, res) => {
   const codeVerifier  = base64url(crypto.randomBytes(32));
@@ -49,7 +58,7 @@ app.get('/auth/login', (req, res) => {
   // Store verifier in session so callback can use it
   req.session.pkce = codeVerifier;
 
-  const redirectUri = `${req.protocol}://${req.get('host')}/auth/callback`;
+  const redirectUri = `${publicBaseUrl(req)}/auth/callback`;
   const params = new URLSearchParams({
     response_type:          'code',
     client_id:              SF_CLIENT_ID,
@@ -58,7 +67,15 @@ app.get('/auth/login', (req, res) => {
     code_challenge:         codeChallenge,
     code_challenge_method:  'S256',
   });
-  res.redirect(`${SF_BASE_URL}/services/oauth2/authorize?${params}`);
+  // Explicitly save the session before redirecting — async store writes can
+  // otherwise race the redirect, leaving the PKCE verifier missing on callback.
+  req.session.save((err) => {
+    if (err) {
+      console.error('[auth/login] session save error:', err);
+      return res.redirect('/?auth_error=session_save_failed');
+    }
+    res.redirect(`${SF_BASE_URL}/services/oauth2/authorize?${params}`);
+  });
 });
 
 // Step 2: SF sends ?code=... back — exchange using PKCE verifier (no secret)
@@ -82,7 +99,7 @@ app.get('/auth/callback', async (req, res) => {
   delete req.session.pkce;
 
   try {
-    const redirectUri = `${req.protocol}://${req.get('host')}/auth/callback`;
+    const redirectUri = `${publicBaseUrl(req)}/auth/callback`;
     const body = new URLSearchParams({
       grant_type:    'authorization_code',
       client_id:     SF_CLIENT_ID,
@@ -123,8 +140,19 @@ app.get('/auth/callback', async (req, res) => {
       displayName:    identity.name || '',
     };
 
-    // Send user to the React app — no tokens in the URL
-    res.redirect('/?auth=ok');
+    console.log('[auth/callback] session stored for', req.session.auth.username, 'sid=' + req.sessionID.slice(0, 8));
+
+    // Explicitly persist the session before sending the redirect, otherwise
+    // the next request (React app loading) may run before the session store
+    // has finished writing — leaving the user effectively unauthenticated.
+    req.session.save((err) => {
+      if (err) {
+        console.error('[auth/callback] session save error:', err);
+        return res.redirect(`/?auth_error=session_save_failed`);
+      }
+      // Send user to the React app — no tokens in the URL
+      res.redirect('/?auth=ok');
+    });
   } catch (e) {
     console.error('[auth/callback] exception:', e.message);
     res.redirect(`/?auth_error=${encodeURIComponent(e.message)}`);
