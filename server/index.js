@@ -92,7 +92,10 @@ app.get('/auth/login', (req, res) => {
     response_type:          'code',
     client_id:              SF_CLIENT_ID,
     redirect_uri:           redirectUri,
-    scope:                  'api chatbot_api',
+    // sfap_api enables /agentforce/bootstrap/nameduser to issue a JWT for the
+    // Agent Runtime API on api.salesforce.com. Without it, the bootstrap
+    // endpoint returns the login HTML page and chat fails.
+    scope:                  'api chatbot_api sfap_api',
     code_challenge:         codeChallenge,
     code_challenge_method:  'S256',
   });
