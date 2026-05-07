@@ -1,5 +1,7 @@
 import express from 'express';
 import session from 'express-session';
+import connectPgSimple from 'connect-pg-simple';
+import pg from 'pg';
 import cors from 'cors';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -21,13 +23,36 @@ app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.set('trust proxy', 1); // Required behind Heroku's proxy for secure cookies
 
+// Session store: prefer Postgres (persistent across dyno restarts) when
+// DATABASE_URL is available. Falls back to in-memory for local dev.
+let sessionStore;
+if (process.env.DATABASE_URL) {
+  const PgStore = connectPgSimple(session);
+  const pool = new pg.Pool({
+    connectionString: process.env.DATABASE_URL,
+    // Heroku Postgres requires SSL; reject-unauthorized: false because
+    // Heroku uses self-signed certs for the cluster.
+    ssl: { rejectUnauthorized: false },
+  });
+  sessionStore = new PgStore({
+    pool,
+    createTableIfMissing: true,
+    tableName: 'session',
+  });
+  console.log('[session] using Postgres-backed store (persistent)');
+} else {
+  console.warn('[session] DATABASE_URL not set — using in-memory store. Sessions WILL be lost on dyno restart.');
+}
+
 app.use(session({
+  store:             sessionStore, // undefined = default MemoryStore (local dev only)
   secret:            SESSION_SECRET,
   resave:            false,
   saveUninitialized: false,
   cookie: {
     secure:   isProd,   // HTTPS-only in prod
     httpOnly: true,
+    sameSite: 'lax',    // OAuth callback is top-level navigation; lax allows cookie
     maxAge:   2 * 60 * 60 * 1000, // 2 hours — matches SF token lifetime
   },
 }));
@@ -178,6 +203,12 @@ app.get('/api/auth/diagnose', async (req, res) => {
     cookieMaxAge:     req.session?.cookie?.maxAge,
     cookieSecure:     req.session?.cookie?.secure,
     cookieHttpOnly:   req.session?.cookie?.httpOnly,
+    cookieSameSite:   req.session?.cookie?.sameSite,
+    storeType:        sessionStore ? 'postgres' : 'memory (volatile)',
+    nodeEnv:          process.env.NODE_ENV,
+    headerXFwdProto:  req.headers['x-forwarded-proto'],
+    reqProtocol:      req.protocol,
+    host:             req.get('host'),
   };
 
   if (!req.session?.auth) {
