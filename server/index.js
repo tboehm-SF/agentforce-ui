@@ -92,11 +92,13 @@ app.get('/auth/login', (req, res) => {
     response_type:          'code',
     client_id:              SF_CLIENT_ID,
     redirect_uri:           redirectUri,
-    // sfap_api: required so /agentforce/bootstrap/nameduser issues a JWT
-    //           for the Agent Runtime API
-    // refresh_token: required so we can refresh the access token in-place
-    //                when it expires (every ~2h), without forcing re-login
-    scope:                  'api chatbot_api sfap_api refresh_token',
+    // sfap_api enables /agentforce/bootstrap/nameduser to issue a JWT for
+    // the Agent Runtime API. The refresh_token scope was failing
+    // OAUTH_APPROVAL_ERROR_GENERIC after Allow on this org — we keep
+    // the refresh-token plumbing in code but don't request the scope.
+    // Sessions still last 365 days via the cookie itself; the access
+    // token inside expires after ~2h and the user re-logs.
+    scope:                  'api chatbot_api sfap_api',
     code_challenge:         codeChallenge,
     code_challenge_method:  'S256',
   });
