@@ -92,10 +92,11 @@ app.get('/auth/login', (req, res) => {
     response_type:          'code',
     client_id:              SF_CLIENT_ID,
     redirect_uri:           redirectUri,
-    // sfap_api enables /agentforce/bootstrap/nameduser to issue a JWT for the
-    // Agent Runtime API on api.salesforce.com. Without it, the bootstrap
-    // endpoint returns the login HTML page and chat fails.
-    scope:                  'api chatbot_api sfap_api',
+    // sfap_api: required so /agentforce/bootstrap/nameduser issues a JWT
+    //           for the Agent Runtime API
+    // refresh_token: required so we can refresh the access token in-place
+    //                when it expires (every ~2h), without forcing re-login
+    scope:                  'api chatbot_api sfap_api refresh_token',
     code_challenge:         codeChallenge,
     code_challenge_method:  'S256',
   });
@@ -161,6 +162,8 @@ app.get('/auth/callback', async (req, res) => {
     // api_instance_url is the correct base for the Agentforce Agent Runtime API
     req.session.auth = {
       accessToken:    tokenData.access_token,
+      refreshToken:   tokenData.refresh_token, // null if scope didn't include refresh_token
+      issuedAt:       Date.now(),
       instanceUrl:    tokenData.instance_url || SF_BASE_URL,
       apiInstanceUrl: tokenData.api_instance_url || tokenData.instance_url || SF_BASE_URL,
       username:       identity.preferred_username || identity.email || '',
@@ -186,6 +189,65 @@ app.get('/auth/callback', async (req, res) => {
     res.redirect(`/?auth_error=${encodeURIComponent(e.message)}`);
   }
 });
+
+// Refresh the SF access token using the refresh_token grant. Mutates
+// req.session.auth in place. Returns true on success, false on failure.
+async function refreshSfAccessToken(req) {
+  const auth = req.session?.auth;
+  if (!auth?.refreshToken) return false;
+  try {
+    const body = new URLSearchParams({
+      grant_type:    'refresh_token',
+      client_id:     SF_CLIENT_ID,
+      refresh_token: auth.refreshToken,
+    });
+    const r = await fetch(`${SF_BASE_URL}/services/oauth2/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+    if (!r.ok) {
+      console.error('[refresh] failed:', r.status, (await r.text()).slice(0, 200));
+      return false;
+    }
+    const td = await r.json();
+    auth.accessToken = td.access_token;
+    auth.issuedAt    = Date.now();
+    if (td.instance_url)     auth.instanceUrl    = td.instance_url;
+    if (td.api_instance_url) auth.apiInstanceUrl = td.api_instance_url;
+    console.log('[refresh] new access token for', auth.username);
+    return true;
+  } catch (e) {
+    console.error('[refresh] exception:', e.message);
+    return false;
+  }
+}
+
+/**
+ * Wrapper around fetch() that auto-retries once on 401 by refreshing the
+ * SF access token. Use this for ANY call to instanceUrl that uses the
+ * Bearer access token from the session.
+ *
+ * Usage:
+ *   const r = await sfFetch(req, url, { headers: { Accept: 'application/json' } });
+ */
+async function sfFetch(req, url, init = {}) {
+  const auth = req.session?.auth;
+  if (!auth?.accessToken) {
+    return new Response(JSON.stringify({ error: 'No session' }), { status: 401 });
+  }
+  const headers = { ...(init.headers || {}), Authorization: `Bearer ${auth.accessToken}` };
+  let r = await fetch(url, { ...init, headers });
+  if (r.status === 401 && auth.refreshToken) {
+    console.log('[sfFetch] 401 on', url.slice(0, 80), '— attempting token refresh');
+    const ok = await refreshSfAccessToken(req);
+    if (ok) {
+      const headers2 = { ...(init.headers || {}), Authorization: `Bearer ${auth.accessToken}` };
+      r = await fetch(url, { ...init, headers: headers2 });
+    }
+  }
+  return r;
+}
 
 // Step 3: React app asks "am I logged in?" — returns user info (no token)
 app.get('/api/auth/me', (req, res) => {
@@ -302,9 +364,7 @@ app.get('/api/auth/agents', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
 
   try {
-    const { accessToken, instanceUrl } = req.session.auth;
-    // Include Type + IsDeleted so the client can filter to reachable agents only.
-    // Some orgs don't expose Type on BotDefinition — if that fails we fall back.
+    const { instanceUrl } = req.session.auth;
     const queryWithType =
       "SELECT Id, DeveloperName, MasterLabel, Type FROM BotDefinition " +
       "WHERE IsDeleted = FALSE ORDER BY MasterLabel";
@@ -313,20 +373,24 @@ app.get('/api/auth/agents', async (req, res) => {
 
     async function runQuery(q) {
       const url = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(q)}`;
-      return fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+      return sfFetch(req, url);
     }
 
     let sfRes = await runQuery(queryWithType);
     if (!sfRes.ok) sfRes = await runQuery(queryNoType);
 
     if (!sfRes.ok) {
-      const err = await sfRes.text();
-      return res.status(sfRes.status).json({ error: err });
+      const errText = await sfRes.text();
+      console.error('[/api/auth/agents]', sfRes.status, errText.slice(0, 300));
+      return res.status(sfRes.status).json({
+        error: `Couldn't load agents (${sfRes.status}). Sign in again to refresh your session.`,
+        details: errText.slice(0, 200),
+      });
     }
-
     const data = await sfRes.json();
     res.json({ agents: data.records ?? [] });
   } catch (e) {
+    console.error('[/api/auth/agents]', e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -342,12 +406,12 @@ app.post('/api/auth/logout', (req, res) => {
 
 app.get('/api/segments', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
-  const { accessToken, instanceUrl } = req.session.auth;
+  const { instanceUrl } = req.session.auth;
   try {
     const page     = parseInt(req.query.page  || '0', 10);
     const pageSize = parseInt(req.query.pageSize || '25', 10);
     const url = `${instanceUrl}/services/data/${SF_API_VERSION}/ssot/segments?offset=${page * pageSize}&batchSize=${pageSize}`;
-    const sfRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const sfRes = await sfFetch(req, url);
     if (!sfRes.ok) {
       const errText = await sfRes.text();
       console.error('[/api/segments] SF error:', sfRes.status, errText.slice(0, 400));
@@ -373,15 +437,15 @@ app.get('/api/segments', async (req, res) => {
 // Returns the segment definition + criteria + a small sample of member records.
 app.get('/api/segments/:apiName', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
-  const { accessToken, instanceUrl } = req.session.auth;
+  const { instanceUrl } = req.session.auth;
   const { apiName } = req.params;
-  const headers = { Authorization: `Bearer ${accessToken}` };
 
   try {
-    // Fetch definition + members in parallel
+    // Fetch definition + members in parallel — both go through sfFetch
+    // so a single token refresh covers both calls
     const [defRes, memRes] = await Promise.all([
-      fetch(`${instanceUrl}/services/data/${SF_API_VERSION}/ssot/segments/${apiName}`, { headers }),
-      fetch(`${instanceUrl}/services/data/${SF_API_VERSION}/ssot/segments/${apiName}/members?limit=5`, { headers }),
+      sfFetch(req, `${instanceUrl}/services/data/${SF_API_VERSION}/ssot/segments/${apiName}`),
+      sfFetch(req, `${instanceUrl}/services/data/${SF_API_VERSION}/ssot/segments/${apiName}/members?limit=5`),
     ]);
 
     if (!defRes.ok) {
@@ -533,7 +597,7 @@ app.post('/api/segments/plan', async (req, res) => {
 
   try {
     const fields = await getUnifiedIndividualFields(accessToken, instanceUrl);
-    const jwt    = await exchangeForAgentJwt(instanceUrl, accessToken);
+    const jwt    = await exchangeForAgentJwt(req, instanceUrl, accessToken);
 
     const fieldList = fields
       .map((f) => `  ${f.name} (${f.type}) — ${f.label}`)
@@ -634,23 +698,18 @@ app.post('/api/segments/create', async (req, res) => {
 
 app.get('/api/campaigns/agents', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
-  const { accessToken, instanceUrl } = req.session.auth;
+  const { instanceUrl } = req.session.auth;
   try {
-    // Return ALL candidate marketing agents from the org. The client probes each
-    // with a HEAD/preflight to know which are reachable via the Agent Runtime API.
-    // Type column added so the client can filter out legacy Einstein bots.
     const q =
       "SELECT Id, DeveloperName, MasterLabel, Type FROM BotDefinition " +
       "WHERE DeveloperName IN ('Campaign_Performance_Agent','Marketing_NBA_Campaign_Agent'," +
       "'Paid_Media_Optimization_Agent','Marketing_Studio_Agent','Analytics_and_Visualization') " +
       "ORDER BY MasterLabel";
-
-    // Try with Type first; if Type column is unavailable in this org, fall back
     const qNoType = q.replace(', Type', '');
 
     async function runQuery(query) {
       const url = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(query)}`;
-      return fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+      return sfFetch(req, url);
     }
 
     let sfRes = await runQuery(q);
@@ -665,13 +724,13 @@ app.get('/api/campaigns/agents', async (req, res) => {
 // Standard SF Campaign records — works with Core OAuth (no DC token exchange)
 app.get('/api/campaigns/records', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
-  const { accessToken, instanceUrl } = req.session.auth;
+  const { instanceUrl } = req.session.auth;
   try {
     const q = `SELECT Id, Name, Type, Status, StartDate, EndDate, ActualCost, BudgetedCost,
                NumberOfLeads, NumberOfConvertedLeads, NumberOfContacts, NumberOfResponses, IsActive
                FROM Campaign ORDER BY StartDate DESC NULLS LAST LIMIT 50`;
     const url = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(q.replace(/\s+/g, ' '))}`;
-    const sfRes = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const sfRes = await sfFetch(req, url);
     if (!sfRes.ok) {
       const errText = await sfRes.text();
       console.error('[/api/campaigns/records] SF error:', sfRes.status, errText.slice(0, 400));
@@ -725,7 +784,7 @@ app.get('/api/content', async (req, res) => {
       `CreatedDate, LastModifiedDate FROM ManagedContent WHERE ${whereClause} ` +
       `ORDER BY LastModifiedDate DESC LIMIT 200`;
     const qUrl = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(q)}`;
-    const qRes = await fetch(qUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const qRes = await sfFetch(req, qUrl);
     if (!qRes.ok) {
       const errText = await qRes.text();
       console.error('[/api/content] SF SOQL error:', qRes.status, errText.slice(0, 400));
@@ -758,9 +817,9 @@ app.get('/api/content', async (req, res) => {
           publishedDate:      r.LastModifiedDate,
         };
         try {
-          const dRes = await fetch(
+          const dRes = await sfFetch(
+            req,
             `${instanceUrl}/services/data/${SF_API_VERSION}/connect/cms/contents/${r.ContentKey}`,
-            { headers: { Authorization: `Bearer ${accessToken}` } }
           );
           if (!dRes.ok) return short;
           const detail = await dRes.json();
@@ -809,32 +868,47 @@ app.get('/api/content', async (req, res) => {
 const sessionAgentMap = new Map();
 const AGENT_API_HOSTS = ['api.salesforce.com', 'test.api.salesforce.com', 'dev.api.salesforce.com'];
 
-/** Exchange the Core OAuth access token for an Agent-API-scoped JWT. */
-async function exchangeForAgentJwt(instanceUrl, accessToken) {
-  const url = `${instanceUrl}/agentforce/bootstrap/nameduser`;
-  const r = await fetch(url, {
-    method: 'GET',
-    headers: {
-      Cookie: `sid=${accessToken}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    redirect: 'manual', // don't follow the login redirect — we want to detect it
-  });
+/**
+ * Exchange the Core OAuth access token for an Agent-API-scoped JWT.
+ * Pass req so we can auto-refresh the access token if SF returns the
+ * HTML login page (which happens when the cookie-auth'd session is
+ * expired). The retry uses the freshly-refreshed token.
+ */
+async function exchangeForAgentJwt(req, instanceUrl, accessToken) {
+  async function attempt(token) {
+    const r = await fetch(`${instanceUrl}/agentforce/bootstrap/nameduser`, {
+      method: 'GET',
+      headers: {
+        Cookie: `sid=${token}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      redirect: 'manual',
+    });
+    const contentType = r.headers.get('content-type') || '';
+    const body        = await r.text();
+    const isHtmlLoginRedirect =
+      contentType.includes('text/html') ||
+      body.trim().startsWith('<!DOCTYPE') ||
+      body.trim().startsWith('<html');
+    return { r, body, contentType, isHtmlLoginRedirect };
+  }
 
-  const contentType = r.headers.get('content-type') || '';
-  const body        = await r.text();
+  let { r, body, isHtmlLoginRedirect } = await attempt(accessToken);
 
-  // Detect login-redirect HTML page — the most common failure mode
-  const isHtmlLoginRedirect =
-    contentType.includes('text/html') ||
-    body.trim().startsWith('<!DOCTYPE') ||
-    body.trim().startsWith('<html');
+  // If the bootstrap returned the SF login page, the access token is stale.
+  // Try a refresh-token grant and retry the bootstrap.
+  if (isHtmlLoginRedirect && req?.session?.auth?.refreshToken) {
+    console.log('[exchangeForAgentJwt] HTML login redirect — attempting token refresh');
+    const ok = await refreshSfAccessToken(req);
+    if (ok) {
+      ({ r, body, isHtmlLoginRedirect } = await attempt(req.session.auth.accessToken));
+    }
+  }
 
   if (isHtmlLoginRedirect) {
     throw new Error(
-      'Your session doesn\'t have Agentforce API permission. Sign out and sign back in to ' +
-      're-approve the app with the updated scopes, then try again.'
+      'Your session expired and could not be refreshed. Sign out and sign back in.'
     );
   }
 
@@ -881,8 +955,8 @@ app.post('/api/agents/:agentId/sessions', async (req, res) => {
   }
 
   try {
-    // 1. Exchange Core token → Agent-API JWT
-    const agentJwt = await exchangeForAgentJwt(instanceUrl, accessToken);
+    // 1. Exchange Core token → Agent-API JWT (auto-refreshes if stale)
+    const agentJwt = await exchangeForAgentJwt(req, instanceUrl, accessToken);
 
     // 2. Create session on api.salesforce.com
     const sfRes = await fetchAgentApi(`/einstein/ai-agent/v1/agents/${agentId}/sessions`, {
@@ -935,10 +1009,10 @@ app.post('/api/agents/:agentId/sessions', async (req, res) => {
 });
 
 /** Refresh the JWT if it's older than 50 minutes (they expire at 60). */
-async function getFreshJwt(sessionInfo) {
+async function getFreshJwt(req, sessionInfo) {
   const ageMin = (Date.now() - sessionInfo.jwtAcquiredAt) / 60000;
   if (ageMin < 50) return sessionInfo.agentJwt;
-  sessionInfo.agentJwt = await exchangeForAgentJwt(sessionInfo.instanceUrl, sessionInfo.accessToken);
+  sessionInfo.agentJwt = await exchangeForAgentJwt(req, sessionInfo.instanceUrl, sessionInfo.accessToken);
   sessionInfo.jwtAcquiredAt = Date.now();
   return sessionInfo.agentJwt;
 }
@@ -954,7 +1028,7 @@ app.post('/api/sessions/:id/messages', async (req, res) => {
   const { sequenceId } = sessionInfo;
 
   try {
-    const jwt = await getFreshJwt(sessionInfo);
+    const jwt = await getFreshJwt(req, sessionInfo);
     const sfRes = await fetchAgentApi(`/einstein/ai-agent/v1/sessions/${id}/messages/stream`, {
       method: 'POST',
       headers: {
@@ -1005,7 +1079,7 @@ app.delete('/api/sessions/:id', async (req, res) => {
   const sessionInfo = sessionAgentMap.get(id);
   if (!sessionInfo) return res.json({ ok: true });
   try {
-    const jwt = await getFreshJwt(sessionInfo);
+    const jwt = await getFreshJwt(req, sessionInfo);
     await fetchAgentApi(`/einstein/ai-agent/v1/sessions/${id}`, {
       method: 'DELETE',
       headers: {
