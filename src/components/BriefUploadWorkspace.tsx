@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import type { AuthState, Agent, FileContext, Brief } from '../types';
 import { useAgentChat } from '../hooks/useAgentChat';
 import { extractFiles, fetchBriefs } from '../api/briefApi';
+import { fetchOrgAgents } from '../api/oauth';
 
 interface Props {
   auth: AuthState;
@@ -9,12 +10,11 @@ interface Props {
   onLogout: () => void;
 }
 
-// The Campaign_Brief_Upload_Agent deployed to the org
-const BRIEF_AGENT_ID = '0Xxg7000000UMj3CAG';
-const BRIEF_AGENT: Agent = {
-  id: BRIEF_AGENT_ID,
+// Default agent info — the ID will be resolved dynamically from the connected org
+const BRIEF_AGENT_DEV_NAME = 'Campaign_Brief_Upload_Agent';
+const BRIEF_AGENT_DEFAULTS: Omit<Agent, 'id'> = {
   name: 'Campaign Brief Agent',
-  developerName: 'Campaign_Brief_Upload_Agent',
+  developerName: BRIEF_AGENT_DEV_NAME,
   description: 'Create campaign briefs conversationally. Upload PDFs, spreadsheets, or images for automatic extraction.',
   icon: '📋',
   color: '#1b96ff',
@@ -57,15 +57,40 @@ export function BriefUploadWorkspace({ onBack, onLogout }: Props) {
   const [briefsLoading, setBriefsLoading] = useState(false);
   const [briefsError, setBriefsError] = useState<string | null>(null);
   const [input, setInput] = useState('');
+  const [resolvedAgent, setResolvedAgent] = useState<Agent | null>(null);
+  const [agentError, setAgentError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Dynamically resolve the Campaign Brief Upload Agent ID from the connected org
+  useEffect(() => {
+    fetchOrgAgents()
+      .then((agents) => {
+        const match = agents.find(a => a.DeveloperName === BRIEF_AGENT_DEV_NAME);
+        if (match) {
+          setResolvedAgent({
+            ...BRIEF_AGENT_DEFAULTS,
+            id: match.Id,
+            name: match.MasterLabel || BRIEF_AGENT_DEFAULTS.name,
+          });
+        } else {
+          setAgentError(
+            `Campaign Brief Upload Agent not found on this org. ` +
+            `Deploy the "${BRIEF_AGENT_DEV_NAME}" agent to this org first.`
+          );
+        }
+      })
+      .catch((e) => setAgentError(`Failed to load agents: ${e.message}`));
+  }, []);
+
   const {
     messages, sendMessage, clearChat,
     isLoading, isStreaming, streamingText, error,
-  } = useAgentChat({ agentApiName: BRIEF_AGENT_ID });
+  } = useAgentChat({ agentApiName: resolvedAgent?.id || '' });
+
+  const BRIEF_AGENT = resolvedAgent || { id: '', ...BRIEF_AGENT_DEFAULTS };
 
   // Auto-scroll on new messages
   useEffect(() => {
@@ -394,7 +419,23 @@ export function BriefUploadWorkspace({ onBack, onLogout }: Props) {
 
           {/* Messages */}
           <div className="relative flex-1 overflow-y-auto px-6 py-5 space-y-4">
-            {isEmpty && (
+            {/* Agent not found on this org */}
+            {agentError && (
+              <div className="h-full flex flex-col items-center justify-center text-center py-12 panel-animate">
+                <div className="w-20 h-20 rounded-2xl flex items-center justify-center text-4xl mb-6"
+                  style={{ background: 'rgba(220,90,20,0.12)', border: '1px solid rgba(220,90,20,0.3)' }}>
+                  ⚠️
+                </div>
+                <h2 className="text-lg font-bold text-white mb-2">Agent Not Available</h2>
+                <p className="text-sm text-white/45 max-w-sm leading-relaxed">{agentError}</p>
+                <button onClick={onBack}
+                  className="mt-4 text-xs px-4 py-2 rounded-lg border border-white/15 text-white/60 hover:text-white/80 hover:border-white/25 transition-all">
+                  ← Back
+                </button>
+              </div>
+            )}
+
+            {isEmpty && !agentError && (
               <div className="h-full flex flex-col items-center justify-center text-center py-12 panel-animate">
                 <div className="relative mb-6">
                   <div className="w-20 h-20 rounded-2xl flex items-center justify-center text-4xl"

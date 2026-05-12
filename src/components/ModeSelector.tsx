@@ -92,7 +92,9 @@ export function ModeSelector({ auth, onSelect, onLogout }: Props) {
             </div>
             <div>
               <div className="text-white font-semibold text-sm leading-none">Agentforce</div>
-              <div className="text-white/30 text-xs mt-0.5">{auth.username ?? auth.instanceUrl}</div>
+              <div className="text-white/30 text-xs mt-0.5">
+                {auth.orgLabel ? `${auth.orgLabel} · ` : ''}{auth.username ?? auth.instanceUrl}
+              </div>
             </div>
           </div>
           <button

@@ -39,6 +39,15 @@ export interface AuthState {
   username?: string;
   displayName?: string;
   orgName?: string;
+  orgId?: string;
+  orgLabel?: string;
+}
+
+/** Org entry returned by GET /api/orgs */
+export interface OrgEntry {
+  id: string;
+  label: string;
+  domain: string;
 }
 
 /** App phase — drives the multi-step onboarding and workspace routing */

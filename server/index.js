@@ -12,13 +12,48 @@ const PORT = process.env.PORT || 3001;
 const isProd = process.env.NODE_ENV === 'production';
 
 // ─── Salesforce config ────────────────────────────────────────────────────────
-const SF_BASE_URL      = process.env.SF_BASE_URL      || 'https://storm-969c7ac7dcf66b.my.salesforce.com';
-// AgentforceUIv3 Connected App — fresh app created 2026-05-12 to fix
-// OAUTH_APPROVAL_ERROR_GENERIC caused by stale OauthToken records on v1/v2.
-// PKCE-only (no client secret), scopes: api, chatbot_api, sfap_api.
-const SF_CLIENT_ID = '3MVG9FofAY6PhRtG_wK6evWxsvT2V6bdd37LMLMauFQT1qVCeaF36n8WfCHFGOmShYxG6p51ZZfsnoZuBy44D';
+// Multi-org support: define orgs via ORG_REGISTRY env var (JSON array) or
+// fall back to single-org legacy config (SF_BASE_URL + SF_CLIENT_ID).
+//
+// ORG_REGISTRY format:
+//   [{"id":"hls","label":"HLS Org","instanceUrl":"https://xyz.my.salesforce.com","clientId":"3MV..."}]
+//
+// Each org needs its own Connected App (PKCE, scopes: api chatbot_api sfap_api).
+
 const SF_API_VERSION   = process.env.SF_API_VERSION   || 'v66.0';
 const SESSION_SECRET   = process.env.SESSION_SECRET   || 'agentforce-dev-secret-change-in-prod';
+
+/** Parse the org registry from env, or build a single-entry list from legacy vars. */
+function loadOrgRegistry() {
+  if (process.env.ORG_REGISTRY) {
+    try {
+      const orgs = JSON.parse(process.env.ORG_REGISTRY);
+      if (!Array.isArray(orgs) || orgs.length === 0) throw new Error('empty');
+      console.log(`[multi-org] Loaded ${orgs.length} org(s) from ORG_REGISTRY`);
+      return orgs;
+    } catch (e) {
+      console.error('[multi-org] Failed to parse ORG_REGISTRY:', e.message, '— falling back to legacy config');
+    }
+  }
+  // Legacy single-org fallback
+  return [{
+    id:          'default',
+    label:       process.env.SF_ORG_LABEL || 'Salesforce Org',
+    instanceUrl: process.env.SF_BASE_URL || 'https://storm-969c7ac7dcf66b.my.salesforce.com',
+    clientId:    process.env.SF_CLIENT_ID || '3MVG9FofAY6PhRtG_wK6evWxsvT2V6bdd37LMLMauFQT1qVCeaF36n8WfCHFGOmShYxG6p51ZZfsnoZuBy44D',
+  }];
+}
+
+const ORG_REGISTRY = loadOrgRegistry();
+
+/** Look up an org config by id. Returns the first org if id is missing or invalid. */
+function getOrgConfig(orgId) {
+  if (!orgId) return ORG_REGISTRY[0];
+  return ORG_REGISTRY.find(o => o.id === orgId) || ORG_REGISTRY[0];
+}
+
+// Legacy compat — used by brief URL injection and other places that still read SF_BASE_URL
+const SF_BASE_URL = ORG_REGISTRY[0].instanceUrl;
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(cors({ origin: true, credentials: true }));
@@ -32,7 +67,18 @@ app.get('/api/health', async (_req, res) => {
     const { PDFParse } = await import('pdf-parse');
     pdfParseOk = typeof PDFParse === 'function';
   } catch { /* */ }
-  res.json({ version: 'a77486b-brief-url-inject', pdfParseV2: pdfParseOk, timestamp: new Date().toISOString() });
+  res.json({ version: 'multi-org-v1', pdfParseV2: pdfParseOk, orgs: ORG_REGISTRY.length, timestamp: new Date().toISOString() });
+});
+
+// List available orgs for the frontend org picker.
+// Only exposes public info (id, label, instanceUrl domain) — never the clientId.
+app.get('/api/orgs', (_req, res) => {
+  const orgs = ORG_REGISTRY.map(o => ({
+    id:     o.id,
+    label:  o.label,
+    domain: new URL(o.instanceUrl).hostname,
+  }));
+  res.json({ orgs });
 });
 
 // Stateless cookie-based session — encrypted+signed payload lives in the
@@ -92,34 +138,31 @@ app.get('/auth/reset', (req, res) => {
 });
 
 // Step 1: Generate PKCE verifier+challenge, store in session, redirect to SF
+// Accepts ?org=<orgId> to select which org to authenticate against.
 app.get('/auth/login', (req, res) => {
+  const orgId = req.query.org || null;
+  const orgConfig = getOrgConfig(orgId);
+
   const codeVerifier  = base64url(crypto.randomBytes(32));
   const codeChallenge = base64url(
     crypto.createHash('sha256').update(codeVerifier).digest()
   );
 
-  // Store verifier in session so callback can use it
-  req.session.pkce = codeVerifier;
+  // Store verifier AND selected org in session so callback can use them
+  req.session.pkce  = codeVerifier;
+  req.session.orgId = orgConfig.id;
 
   const redirectUri = `${publicBaseUrl(req)}/auth/callback`;
   const params = new URLSearchParams({
     response_type:          'code',
-    client_id:              SF_CLIENT_ID,
+    client_id:              orgConfig.clientId,
     redirect_uri:           redirectUri,
-    // sfap_api enables /agentforce/bootstrap/nameduser to issue a JWT for
-    // the Agent Runtime API.
-    // DO NOT add refresh_token scope — this org accumulates stale
-    // OauthToken records that cause OAUTH_APPROVAL_ERROR_GENERIC when
-    // refresh_token is requested. Without it, the access token expires
-    // after ~2h; the user must sign in again when it expires.
     scope:                  'api chatbot_api sfap_api',
     code_challenge:         codeChallenge,
     code_challenge_method:  'S256',
   });
-  // cookie-session writes synchronously during res.writeHead() — no
-  // explicit save needed. The PKCE verifier we just put on req.session
-  // will be encoded into the Set-Cookie header before this redirect ships.
-  res.redirect(`${SF_BASE_URL}/services/oauth2/authorize?${params}`);
+  console.log(`[auth/login] Redirecting to org "${orgConfig.id}" (${orgConfig.label})`);
+  res.redirect(`${orgConfig.instanceUrl}/services/oauth2/authorize?${params}`);
 });
 
 // Step 2: SF sends ?code=... back — exchange using PKCE verifier (no secret)
@@ -140,19 +183,22 @@ app.get('/auth/callback', async (req, res) => {
     console.error('[auth/callback] no PKCE verifier in session');
     return res.redirect('/?auth_error=session_missing_pkce');
   }
+
+  // Retrieve the org config stored during /auth/login
+  const orgConfig = getOrgConfig(req.session.orgId);
   delete req.session.pkce;
 
   try {
     const redirectUri = `${publicBaseUrl(req)}/auth/callback`;
     const body = new URLSearchParams({
       grant_type:    'authorization_code',
-      client_id:     SF_CLIENT_ID,
+      client_id:     orgConfig.clientId,
       redirect_uri:  redirectUri,
       code:          code,
       code_verifier: codeVerifier,
     });
 
-    const tokenRes = await fetch(`${SF_BASE_URL}/services/oauth2/token`, {
+    const tokenRes = await fetch(`${orgConfig.instanceUrl}/services/oauth2/token`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body:    body.toString(),
@@ -180,10 +226,12 @@ app.get('/auth/callback', async (req, res) => {
       accessToken:    tokenData.access_token,
       refreshToken:   tokenData.refresh_token, // null if scope didn't include refresh_token
       issuedAt:       Date.now(),
-      instanceUrl:    tokenData.instance_url || SF_BASE_URL,
-      apiInstanceUrl: tokenData.api_instance_url || tokenData.instance_url || SF_BASE_URL,
+      instanceUrl:    tokenData.instance_url || orgConfig.instanceUrl,
+      apiInstanceUrl: tokenData.api_instance_url || tokenData.instance_url || orgConfig.instanceUrl,
       username:       identity.preferred_username || identity.email || '',
       displayName:    identity.name || '',
+      orgId:          orgConfig.id,
+      orgLabel:       orgConfig.label,
     };
 
     // Diagnostic: log the cookie size we're about to send. cookie-session
@@ -211,13 +259,14 @@ app.get('/auth/callback', async (req, res) => {
 async function refreshSfAccessToken(req) {
   const auth = req.session?.auth;
   if (!auth?.refreshToken) return false;
+  const orgConfig = getOrgConfig(auth.orgId);
   try {
     const body = new URLSearchParams({
       grant_type:    'refresh_token',
-      client_id:     SF_CLIENT_ID,
+      client_id:     orgConfig.clientId,
       refresh_token: auth.refreshToken,
     });
-    const r = await fetch(`${SF_BASE_URL}/services/oauth2/token`, {
+    const r = await fetch(`${orgConfig.instanceUrl}/services/oauth2/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: body.toString(),
@@ -268,8 +317,8 @@ async function sfFetch(req, url, init = {}) {
 // Step 3: React app asks "am I logged in?" — returns user info (no token)
 app.get('/api/auth/me', (req, res) => {
   if (!req.session.auth) return res.status(401).json({ authenticated: false });
-  const { username, displayName, instanceUrl } = req.session.auth;
-  res.json({ authenticated: true, username, displayName, instanceUrl });
+  const { username, displayName, instanceUrl, orgId, orgLabel } = req.session.auth;
+  res.json({ authenticated: true, username, displayName, instanceUrl, orgId, orgLabel });
 });
 
 // Diagnostic — returns whether each downstream API is reachable with the
@@ -1448,8 +1497,10 @@ app.post('/api/sessions/:id/messages', async (req, res) => {
     }
 
     // If a brief was created, append a final text chunk with the clickable URL
+    // Use the session's instanceUrl (not hardcoded) for multi-org support
     if (detectedBriefId) {
-      const briefUrl = `${SF_BASE_URL}/lightning/r/Brief/${detectedBriefId}/view`;
+      const sessionInstanceUrl = req.session.auth?.instanceUrl || SF_BASE_URL;
+      const briefUrl = `${sessionInstanceUrl}/lightning/r/Brief/${detectedBriefId}/view`;
       const linkText = `\n\n🔗 View Brief in Salesforce: ${briefUrl}`;
       const linkEvent = {
         type: 'TextChunk',

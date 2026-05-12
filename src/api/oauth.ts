@@ -9,11 +9,25 @@
  *   POST /api/auth/logout → destroys session
  */
 
-import type { AuthState } from '../types';
+import type { AuthState, OrgEntry } from '../types';
 
-/** Kick off login — navigate to the server's /auth/login endpoint. */
-export function startLogin(): void {
-  window.location.href = '/auth/login';
+/** Kick off login — navigate to the server's /auth/login endpoint.
+ *  Optionally pass an orgId to select which org to authenticate against. */
+export function startLogin(orgId?: string): void {
+  const url = orgId ? `/auth/login?org=${encodeURIComponent(orgId)}` : '/auth/login';
+  window.location.href = url;
+}
+
+/** Fetch the list of available orgs from the server. */
+export async function fetchOrgs(): Promise<OrgEntry[]> {
+  try {
+    const res = await fetch('/api/orgs');
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.orgs ?? [];
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -31,6 +45,8 @@ export async function checkSession(): Promise<AuthState | null> {
       instanceUrl: data.instanceUrl,
       username:    data.username,
       displayName: data.displayName,
+      orgId:       data.orgId,
+      orgLabel:    data.orgLabel,
     };
   } catch {
     return null;

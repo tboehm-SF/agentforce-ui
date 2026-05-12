@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { startLogin } from '../api/oauth';
+import { useState, useEffect } from 'react';
+import { startLogin, fetchOrgs } from '../api/oauth';
+import type { OrgEntry } from '../types';
 
 interface Props {
   error?: string | null;
@@ -7,6 +8,20 @@ interface Props {
 
 export function LoginScreen({ error }: Props) {
   const [hovering, setHovering] = useState(false);
+  const [orgs, setOrgs] = useState<OrgEntry[]>([]);
+  const [selectedOrg, setSelectedOrg] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetchOrgs().then((o) => {
+      setOrgs(o);
+      if (o.length > 0) setSelectedOrg(o[0].id);
+      setLoading(false);
+    });
+  }, []);
+
+  const currentOrg = orgs.find(o => o.id === selectedOrg);
+  const multiOrg = orgs.length > 1;
 
   return (
     <div className="relative min-h-screen flex items-center justify-center overflow-hidden bg-space">
@@ -59,30 +74,80 @@ export function LoginScreen({ error }: Props) {
             </div>
           )}
 
-          {/* Org indicator */}
-          <div className="flex items-center gap-3 mb-6 px-3 py-2.5 rounded-xl"
-            style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}>
-            <div className="w-7 h-7 rounded-lg bg-[#1b96ff]/15 flex items-center justify-center text-sm">🏢</div>
-            <div>
-              <div className="text-xs font-medium text-white/60">Connecting to</div>
-              <div className="text-xs text-white/30">storm-969c7ac7dcf66b.my.salesforce.com</div>
+          {/* Org selector — shown when multiple orgs are available */}
+          {multiOrg && (
+            <div className="mb-4">
+              <label className="text-xs font-medium text-white/40 block mb-2">Select Organization</label>
+              <div className="space-y-2">
+                {orgs.map((org) => (
+                  <button
+                    key={org.id}
+                    onClick={() => setSelectedOrg(org.id)}
+                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all text-left"
+                    style={{
+                      background: selectedOrg === org.id ? 'rgba(1,118,211,0.12)' : 'rgba(255,255,255,0.03)',
+                      border: `1px solid ${selectedOrg === org.id ? 'rgba(27,150,255,0.4)' : 'rgba(255,255,255,0.06)'}`,
+                    }}
+                  >
+                    <div className="w-7 h-7 rounded-lg flex items-center justify-center text-sm"
+                      style={{
+                        background: selectedOrg === org.id ? 'rgba(27,150,255,0.2)' : 'rgba(255,255,255,0.06)',
+                      }}>
+                      🏢
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-medium" style={{ color: selectedOrg === org.id ? '#1b96ff' : 'rgba(255,255,255,0.6)' }}>
+                        {org.label}
+                      </div>
+                      <div className="text-xs text-white/25 truncate">{org.domain}</div>
+                    </div>
+                    {selectedOrg === org.id && (
+                      <div className="w-4 h-4 rounded-full flex items-center justify-center"
+                        style={{ background: '#1b96ff' }}>
+                        <span className="text-white text-xs">✓</span>
+                      </div>
+                    )}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className="ml-auto flex items-center gap-1.5">
-              <span className="live-dot" />
-              <span className="text-xs text-[#2e844a]">Live</span>
+          )}
+
+          {/* Org indicator — single org only */}
+          {!multiOrg && currentOrg && (
+            <div className="flex items-center gap-3 mb-6 px-3 py-2.5 rounded-xl"
+              style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}>
+              <div className="w-7 h-7 rounded-lg bg-[#1b96ff]/15 flex items-center justify-center text-sm">🏢</div>
+              <div>
+                <div className="text-xs font-medium text-white/60">{currentOrg.label}</div>
+                <div className="text-xs text-white/30">{currentOrg.domain}</div>
+              </div>
+              <div className="ml-auto flex items-center gap-1.5">
+                <span className="live-dot" />
+                <span className="text-xs text-[#2e844a]">Live</span>
+              </div>
             </div>
-          </div>
+          )}
+
+          {/* Loading state */}
+          {loading && (
+            <div className="flex items-center justify-center py-4 mb-4">
+              <div className="spinner spinner-sm" />
+              <span className="text-xs text-white/40 ml-2">Loading orgs…</span>
+            </div>
+          )}
 
           {/* CTA */}
           <button
-            onClick={startLogin}
+            onClick={() => startLogin(selectedOrg || undefined)}
             onMouseEnter={() => setHovering(true)}
             onMouseLeave={() => setHovering(false)}
-            className="w-full py-3.5 rounded-xl text-sm font-semibold text-white transition-all duration-200 flex items-center justify-center gap-2.5 relative overflow-hidden group"
+            disabled={loading || !selectedOrg}
+            className="w-full py-3.5 rounded-xl text-sm font-semibold text-white transition-all duration-200 flex items-center justify-center gap-2.5 relative overflow-hidden group disabled:opacity-40 disabled:cursor-not-allowed"
             style={{
-              background: hovering ? 'linear-gradient(135deg, #1b96ff, #0176d3)' : 'linear-gradient(135deg, #0176d3, #014486)',
-              boxShadow: hovering ? '0 8px 24px rgba(27,150,255,0.4)' : 'none',
-              transform: hovering ? 'translateY(-1px)' : 'none',
+              background: hovering && !loading ? 'linear-gradient(135deg, #1b96ff, #0176d3)' : 'linear-gradient(135deg, #0176d3, #014486)',
+              boxShadow: hovering && !loading ? '0 8px 24px rgba(27,150,255,0.4)' : 'none',
+              transform: hovering && !loading ? 'translateY(-1px)' : 'none',
             }}
           >
             <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
