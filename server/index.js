@@ -97,9 +97,13 @@ app.get('/auth/login', (req, res) => {
     client_id:              SF_CLIENT_ID,
     redirect_uri:           redirectUri,
     // sfap_api enables /agentforce/bootstrap/nameduser to issue a JWT for
-    // the Agent Runtime API. refresh_token keeps the session alive when
-    // the ~2h access token expires (refresh grant returns a fresh one).
-    scope:                  'api chatbot_api sfap_api refresh_token',
+    // the Agent Runtime API.
+    // DO NOT add refresh_token scope — this org accumulates stale
+    // OauthToken records that cause OAUTH_APPROVAL_ERROR_GENERIC when
+    // refresh_token is requested. Without it, the access token expires
+    // after ~2h; the exchangeForAgentJwt() function detects the HTML
+    // login redirect and surfaces a "sign back in" message.
+    scope:                  'api chatbot_api sfap_api',
     code_challenge:         codeChallenge,
     code_challenge_method:  'S256',
   });
