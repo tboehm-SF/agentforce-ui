@@ -49,10 +49,38 @@ export type AppPhase =
   | 'mission-control'  // existing: agent workspace
   | 'segments'         // NEW: Data Cloud segments workspace
   | 'campaigns'        // NEW: campaigns workspace (via marketing agent)
-  | 'content';         // NEW: content query workspace
+  | 'content'          // NEW: content query workspace
+  | 'brief-upload';    // NEW: campaign brief upload workspace
 
 /** Mode picked by user at the mode-selector screen */
-export type WorkspaceMode = 'agents' | 'segments' | 'campaigns' | 'content';
+export type WorkspaceMode = 'agents' | 'segments' | 'campaigns' | 'content' | 'brief-upload';
+
+/** Extracted file content returned from the server */
+export interface FileContext {
+  name: string;
+  type: string;        // MIME type
+  size: number;
+  extractedText: string;
+  metadata?: Record<string, unknown>;
+  preview?: string;
+  error?: string;
+}
+
+/** A Campaign Brief record from Salesforce */
+export interface Brief {
+  Id: string;
+  Name: string;
+  Description?: string;
+  KeyMessage?: string;
+  TargetAudience?: string;
+  PrimaryGoal?: string;
+  PrimaryKpi?: string;
+  PrimaryCtas?: string;
+  Priority?: string;
+  AdditionalNotes?: string;
+  IsConversational?: boolean;
+  CreatedDate?: string;
+}
 
 /** A Data Cloud segment record */
 export interface Segment {

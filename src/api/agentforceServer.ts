@@ -7,7 +7,7 @@
  * needing a Salesforce account.
  */
 
-import type { Session } from '../types';
+import type { Session, FileContext } from '../types';
 
 /**
  * Ask the server to create a new agent session.
@@ -44,20 +44,27 @@ export async function deleteServerSession(sessionId: string): Promise<void> {
 
 /**
  * Stream a message via the Express server (server proxies to SF SSE stream).
+ * If fileContext is provided, the server prepends extracted file text to the
+ * message before forwarding to the Agent Runtime API.
  */
 export async function sendServerMessageStreaming(
   sessionId: string,
   message: string,
   onChunk: (chunk: string) => void,
   onDone:  (fullText: string) => void,
-  onError: (err: Error) => void
+  onError: (err: Error) => void,
+  fileContext?: FileContext[],
 ): Promise<void> {
   try {
+    const body: Record<string, unknown> = { message };
+    if (fileContext && fileContext.length > 0) {
+      body.fileContext = fileContext;
+    }
     const res = await fetch(`/api/sessions/${sessionId}/messages`, {
       method:  'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ message }),
+      body:    JSON.stringify(body),
     });
 
     if (!res.ok) {

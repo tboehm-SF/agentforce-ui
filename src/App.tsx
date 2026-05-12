@@ -10,6 +10,7 @@ import { AgentChatPanel }      from './components/AgentChatPanel';
 import { SegmentsWorkspace }   from './components/SegmentsWorkspace';
 import { CampaignsWorkspace }  from './components/CampaignsWorkspace';
 import { ContentWorkspace }    from './components/ContentWorkspace';
+import { BriefUploadWorkspace } from './components/BriefUploadWorkspace';
 import './index.css';
 
 /**
@@ -50,7 +51,7 @@ export default function App() {
         } else {
           // Page refresh — restore last workspace if we can
           const lastPhase = sessionStorage.getItem('sf_last_phase') as AppPhase | null;
-          if (lastPhase === 'segments' || lastPhase === 'campaigns' || lastPhase === 'content') {
+          if (lastPhase === 'segments' || lastPhase === 'campaigns' || lastPhase === 'content' || lastPhase === 'brief-upload') {
             setPhase(lastPhase);
           } else {
             // Restore agent workspace if pinned agents exist
@@ -145,6 +146,16 @@ export default function App() {
   if (phase === 'campaigns' && auth) {
     return (
       <CampaignsWorkspace
+        auth={auth}
+        onBack={handleBackToModeSelector}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
+  if (phase === 'brief-upload' && auth) {
+    return (
+      <BriefUploadWorkspace
         auth={auth}
         onBack={handleBackToModeSelector}
         onLogout={handleLogout}

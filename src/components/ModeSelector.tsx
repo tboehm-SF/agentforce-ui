@@ -57,6 +57,16 @@ const MODES: {
     glow: 'rgba(221,122,1,0.25)',
     tags: ['CMS assets', 'Tag search', 'Images & docs'],
   },
+  {
+    id: 'brief-upload',
+    icon: '📋',
+    label: 'Brief Upload',
+    description: 'Upload campaign briefs (PDF, Excel, images) and create Salesforce Brief records with AI',
+    accent: '#2e844a',
+    bg: 'rgba(46,132,74,0.12)',
+    glow: 'rgba(46,132,74,0.25)',
+    tags: ['File upload', 'AI extraction', 'Brief creation'],
+  },
 ];
 
 export function ModeSelector({ auth, onSelect, onLogout }: Props) {
@@ -103,7 +113,7 @@ export function ModeSelector({ auth, onSelect, onLogout }: Props) {
           </p>
         </div>
 
-        {/* Mode grid */}
+        {/* Mode grid — 5 items: 2+2+1 layout, last item spans full or uses col-span */}
         <div className="grid grid-cols-2 gap-4 flex-1 content-start">
           {MODES.map((mode) => {
             const isHovered = hovered === mode.id;

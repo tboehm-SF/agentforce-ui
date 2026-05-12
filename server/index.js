@@ -1,6 +1,7 @@
 import express from 'express';
 import cookieSession from 'cookie-session';
 import cors from 'cors';
+import multer from 'multer';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import crypto from 'crypto';
@@ -499,6 +500,172 @@ app.get('/api/segments/:apiName', async (req, res) => {
   }
 });
 
+// ─── Segment Member Profile Resolution ──────────────────────────────────────
+// Resolves segment members from hash IDs to full unified profiles.
+// Steps:
+//   1. Discover the org-specific SMH (Segment Membership History) table name
+//   2. Query members of a specific segment via Segment_Id__c
+//   3. Resolve unified individual IDs to full profile data (name, email, etc.)
+// Uses the Data Cloud queryv2 REST endpoint (POST /ssot/query with SQL).
+
+let smhTableCache = null; // { name, discoveredAt }
+
+/** POST to /ssot/query with a SQL string, return parsed response. */
+async function dcQuery(req, sql) {
+  const { instanceUrl } = req.session.auth;
+  const url = `${instanceUrl}/services/data/${SF_API_VERSION}/ssot/query`;
+  const r = await sfFetch(req, url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sql }),
+  });
+  if (!r.ok) {
+    const errText = await r.text();
+    throw new Error(`Data Cloud query failed (${r.status}): ${errText.slice(0, 300)}`);
+  }
+  return r.json();
+}
+
+/** Discover the SMH table name by querying DataSourceObject for tables containing "SMH". */
+async function discoverSmhTable(req) {
+  if (smhTableCache && Date.now() - smhTableCache.discoveredAt < 30 * 60 * 1000) {
+    return smhTableCache.name;
+  }
+  const result = await dcQuery(req,
+    "SELECT DataSourceObject__dlm.ssot__Name__c FROM DataSourceObject__dlm WHERE DataSourceObject__dlm.ssot__Name__c LIKE '%SMH%'"
+  );
+  const rows = result.data || [];
+  if (rows.length === 0) throw new Error('No segment membership history (SMH) table found. Ensure segments are published.');
+  // Prefer Individual-based SMH tables
+  const names = rows.map(r => Array.isArray(r) ? r[0] : r?.ssot__Name__c || r);
+  const indivTable = names.find(n => typeof n === 'string' && n.toLowerCase().includes('individual'));
+  const tableName = indivTable || names[0];
+  smhTableCache = { name: tableName, discoveredAt: Date.now() };
+  console.log('[smh-discovery] Found SMH table:', tableName);
+  return tableName;
+}
+
+// GET /api/segments/:apiName/profiles — resolve segment members to full profiles
+app.get('/api/segments/:apiName/profiles', async (req, res) => {
+  if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
+  const { instanceUrl } = req.session.auth;
+  const { apiName } = req.params;
+  const limit = Math.min(parseInt(req.query.limit || '20', 10), 100);
+
+  try {
+    // 1. Get the MarketSegment record ID from the apiName
+    const segQ = `SELECT Id, Name FROM MarketSegment WHERE ApiName = '${apiName.replace(/'/g, "''")}' LIMIT 1`;
+    const segUrl = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(segQ)}`;
+    const segRes = await sfFetch(req, segUrl);
+    if (!segRes.ok) {
+      const e = await segRes.text();
+      return res.status(segRes.status).json({ error: `MarketSegment lookup failed: ${e.slice(0, 200)}` });
+    }
+    const segData = await segRes.json();
+    if (!segData.records || segData.records.length === 0) {
+      return res.status(404).json({ error: `Segment "${apiName}" not found in MarketSegment` });
+    }
+    const segmentId = segData.records[0].Id;
+    const segmentName = segData.records[0].Name;
+    // SF IDs in SMH are 15-char
+    const segmentId15 = segmentId.substring(0, 15);
+
+    // 2. Discover the SMH table name
+    const smhTable = await discoverSmhTable(req);
+
+    // 3. Query segment members — deduplicated by unified individual ID
+    const memberSql =
+      `SELECT Id__c, MAX(Timestamp__c) as LatestTimestamp ` +
+      `FROM ${smhTable} ` +
+      `WHERE Segment_Id__c = '${segmentId15}' ` +
+      `GROUP BY Id__c ` +
+      `LIMIT ${limit}`;
+    const memberResult = await dcQuery(req, memberSql);
+    const memberRows = memberResult.data || [];
+
+    if (memberRows.length === 0) {
+      return res.json({
+        segmentName,
+        segmentId,
+        profiles: [],
+        count: 0,
+        message: 'No members found. Segment may not be published yet.',
+      });
+    }
+
+    // Extract unified individual IDs from positional arrays
+    // queryv2 returns either positional arrays or objects depending on API version
+    const unifiedIds = memberRows.map(r => Array.isArray(r) ? r[0] : r?.Id__c || r?.id__c || Object.values(r)[0]);
+    const validIds = unifiedIds.filter(id => id && typeof id === 'string');
+
+    if (validIds.length === 0) {
+      return res.json({ segmentName, segmentId, profiles: [], count: 0, message: 'Could not parse member IDs.' });
+    }
+
+    // 4. Resolve unified IDs to full profiles from ssot__Individual__dlm
+    const idList = validIds.map(id => `'${id}'`).join(',');
+    const profileSql =
+      `SELECT ssot__Id__c, ssot__FirstName__c, ssot__LastName__c, ` +
+      `ssot__DataSourceId__c ` +
+      `FROM ssot__Individual__dlm ` +
+      `WHERE ssot__Id__c IN (${idList})`;
+    let profiles = [];
+    try {
+      const profileResult = await dcQuery(req, profileSql);
+      const profileRows = profileResult.data || [];
+      // Parse metadata to map column positions to field names
+      const meta = profileResult.metadata || {};
+      const columns = Object.keys(meta);
+
+      profiles = profileRows.map(row => {
+        if (Array.isArray(row)) {
+          const obj = {};
+          columns.forEach((col, i) => { obj[col] = row[i]; });
+          return obj;
+        }
+        return row;
+      });
+    } catch (profileErr) {
+      console.warn('[profiles] Could not resolve profiles:', profileErr.message);
+      // Return members without profile enrichment
+      profiles = validIds.map(id => ({ ssot__Id__c: id }));
+    }
+
+    // 5. Try to enrich with email from ContactPointEmail
+    try {
+      const emailSql =
+        `SELECT ssot__PartyId__c, ssot__EmailAddress__c ` +
+        `FROM ssot__ContactPointEmail__dlm ` +
+        `WHERE ssot__PartyId__c IN (${idList})`;
+      const emailResult = await dcQuery(req, emailSql);
+      const emailRows = emailResult.data || [];
+      const emailMeta = Object.keys(emailResult.metadata || {});
+      const emailMap = {};
+      for (const row of emailRows) {
+        const partyId = Array.isArray(row) ? row[emailMeta.indexOf('ssot__PartyId__c')] || row[0] : row?.ssot__PartyId__c;
+        const email = Array.isArray(row) ? row[emailMeta.indexOf('ssot__EmailAddress__c')] || row[1] : row?.ssot__EmailAddress__c;
+        if (partyId && email) emailMap[partyId] = email;
+      }
+      // Merge emails into profiles
+      for (const p of profiles) {
+        const id = p.ssot__Id__c || p['ssot__Id__c'];
+        if (id && emailMap[id]) p.email = emailMap[id];
+      }
+    } catch { /* email enrichment is best-effort */ }
+
+    res.json({
+      segmentName,
+      segmentId,
+      profiles,
+      count: profiles.length,
+      totalMembers: memberRows.length,
+    });
+  } catch (e) {
+    console.error('[segment profiles]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── AI Segment Builder ──────────────────────────────────────────────────────
 // Two-step workflow:
 //   POST /api/segments/plan   → LLM drafts a segment spec from NL input (preview)
@@ -756,6 +923,167 @@ app.get('/api/campaigns/records', async (req, res) => {
     res.json({ campaigns: data.records ?? [], totalSize: data.totalSize ?? 0 });
   } catch (e) {
     console.error('[/api/campaigns/records]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── File Upload + Extraction Pipeline ───────────────────────────────────────
+// Accepts multi-format file uploads (PDF, Excel, CSV, Word, images, text),
+// extracts text content server-side, and returns it for agent chat context.
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB max
+  fileFilter: (_req, file, cb) => {
+    const allowed = [
+      'application/pdf',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.ms-excel',
+      'text/csv',
+      'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/tiff',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'text/plain',
+    ];
+    cb(null, allowed.includes(file.mimetype));
+  },
+});
+
+/** Extract text content from a file buffer based on MIME type. */
+async function extractFileContent(file) {
+  const { mimetype, buffer, originalname } = file;
+
+  // PDF
+  if (mimetype === 'application/pdf') {
+    const pdfParse = (await import('pdf-parse')).default;
+    // pdf-parse expects a Buffer — convert from Uint8Array if needed
+    const data = await pdfParse(Buffer.from(buffer));
+    return {
+      text: data.text,
+      metadata: { pages: data.numpages, title: data.info?.Title || originalname },
+      preview: data.text.substring(0, 500),
+    };
+  }
+
+  // Excel / CSV
+  if (mimetype.includes('spreadsheet') || mimetype.includes('excel') || mimetype === 'text/csv') {
+    const XLSX = await import('xlsx');
+    const workbook = XLSX.read(buffer, { type: 'buffer' });
+    let fullText = '';
+    const sheetSummaries = {};
+    for (const name of workbook.SheetNames) {
+      const sheet = workbook.Sheets[name];
+      const csv = XLSX.utils.sheet_to_csv(sheet);
+      const rows = XLSX.utils.sheet_to_json(sheet);
+      fullText += `\n--- Sheet: ${name} (${rows.length} rows) ---\n${csv}`;
+      sheetSummaries[name] = rows.length;
+    }
+    return {
+      text: fullText.trim(),
+      metadata: { sheets: workbook.SheetNames, rowCounts: sheetSummaries },
+      preview: fullText.substring(0, 500),
+    };
+  }
+
+  // Word documents (docx) — extract from internal XML
+  if (mimetype.includes('wordprocessingml')) {
+    try {
+      const { Readable } = await import('stream');
+      const { createUnzip } = await import('zlib');
+      // Use a simple approach: find document.xml in the zip and strip XML tags
+      const entries = [];
+      // Node 22+ has built-in unzip support via decompress, but for simplicity
+      // we'll use a basic approach to find the document.xml content
+      const headerIdx = buffer.indexOf(Buffer.from('word/document.xml'));
+      if (headerIdx >= 0) {
+        // Manual zip parsing is fragile — try the text extraction fallback
+        const textContent = buffer.toString('utf8')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .replace(/PK.*$/s, '') // strip zip binary data
+          .trim();
+        const cleaned = textContent.replace(/[^\x20-\x7E\n\r]/g, ' ').replace(/\s+/g, ' ').trim();
+        return {
+          text: cleaned.substring(0, 50000),
+          metadata: { format: 'docx', name: originalname },
+          preview: cleaned.substring(0, 500),
+        };
+      }
+      return { text: '', metadata: { format: 'docx', error: 'Could not parse document' }, preview: '' };
+    } catch (e) {
+      return { text: '', metadata: { format: 'docx', error: e.message }, preview: '' };
+    }
+  }
+
+  // Images — no OCR yet, return description
+  if (mimetype.startsWith('image/')) {
+    return {
+      text: `[Image file: ${originalname} (${mimetype}, ${(buffer.length / 1024).toFixed(1)}KB). Image content cannot be extracted as text. Please describe what this image contains.]`,
+      metadata: { format: mimetype, size: buffer.length, name: originalname },
+      preview: `Image: ${originalname}`,
+    };
+  }
+
+  // Plain text
+  if (mimetype === 'text/plain') {
+    const text = buffer.toString('utf8');
+    return { text, metadata: { format: 'text', name: originalname }, preview: text.substring(0, 500) };
+  }
+
+  throw new Error(`Unsupported file type: ${mimetype}`);
+}
+
+function requireAuth(req, res, next) {
+  if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
+  next();
+}
+
+// POST /api/files/extract — upload files, extract text content
+app.post('/api/files/extract', requireAuth, upload.array('files', 5), async (req, res) => {
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({ error: 'No files uploaded' });
+  }
+  const results = [];
+  for (const file of req.files) {
+    try {
+      const extracted = await extractFileContent(file);
+      results.push({
+        name: file.originalname,
+        type: file.mimetype,
+        size: file.size,
+        extractedText: extracted.text,
+        metadata: extracted.metadata,
+        preview: extracted.preview,
+      });
+    } catch (err) {
+      console.error('[file extract]', file.originalname, err.message);
+      results.push({
+        name: file.originalname,
+        type: file.mimetype,
+        size: file.size,
+        error: err.message,
+      });
+    }
+  }
+  res.json({ files: results });
+});
+
+// ─── Brief API (direct CRUD — complements the agent's Apex actions) ─────────
+
+app.get('/api/briefs', requireAuth, async (req, res) => {
+  const { instanceUrl } = req.session.auth;
+  try {
+    const q = `SELECT Id, Name, Description, KeyMessage, TargetAudience, PrimaryGoal,
+               PrimaryKpi, PrimaryCtas, Priority, AdditionalNotes, IsConversational, CreatedDate
+               FROM Brief ORDER BY CreatedDate DESC LIMIT 50`;
+    const url = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(q.replace(/\s+/g, ' '))}`;
+    const sfRes = await sfFetch(req, url);
+    if (!sfRes.ok) {
+      const errText = await sfRes.text();
+      return res.status(sfRes.status).json({ error: errText.slice(0, 300) });
+    }
+    const data = await sfRes.json();
+    res.json({ briefs: data.records ?? [], totalSize: data.totalSize ?? 0 });
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
@@ -1031,9 +1359,24 @@ async function getFreshJwt(req, sessionInfo) {
 app.post('/api/sessions/:id/messages', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
   const { id }      = req.params;
-  const { message } = req.body;
+  const { message, fileContext } = req.body;
   const sessionInfo = sessionAgentMap.get(id);
   if (!sessionInfo) return res.status(404).json({ error: 'Session not found or expired. Start a new chat.' });
+
+  // Build the enriched message — if the user uploaded files, prepend their
+  // extracted text so the agent has full context for brief creation.
+  let enrichedMessage = message;
+  if (Array.isArray(fileContext) && fileContext.length > 0) {
+    const filesSummary = fileContext
+      .filter(f => f.extractedText)
+      .map(f => `--- File: ${f.name} (${f.type}) ---\n${f.extractedText}`)
+      .join('\n\n');
+    if (filesSummary) {
+      enrichedMessage =
+        `The user has uploaded the following files for context:\n\n${filesSummary}\n\n` +
+        `User message: ${message}`;
+    }
+  }
 
   sessionInfo.sequenceId += 1;
   const { sequenceId } = sessionInfo;
@@ -1049,7 +1392,7 @@ app.post('/api/sessions/:id/messages', async (req, res) => {
         'x-client-name': 'agentforce-ui',
       },
       body: JSON.stringify({
-        message: { sequenceId, type: 'Text', text: message },
+        message: { sequenceId, type: 'Text', text: enrichedMessage },
         variables: [],
       }),
     });

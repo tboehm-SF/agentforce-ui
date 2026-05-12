@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback } from 'react';
-import type { Message, Session } from '../types';
+import type { Message, Session, FileContext } from '../types';
 import {
   createServerSession,
   sendServerMessageStreaming,
@@ -27,13 +27,17 @@ export function useAgentChat({ agentApiName }: { agentApiName: string; }) {
     return session;
   }, [agentApiName]);
 
-  const sendMessage = useCallback(async (text: string) => {
+  const sendMessage = useCallback(async (text: string, fileContext?: FileContext[]) => {
     if (!text.trim() || isLoading) return;
     setError(null);
 
+    // Show file names as attachments in the user message
+    const attachLabel = fileContext?.length
+      ? `\n\n📎 ${fileContext.map(f => f.name).join(', ')}`
+      : '';
     setMessages((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), role: 'user', content: text, timestamp: new Date() },
+      { id: crypto.randomUUID(), role: 'user', content: text + attachLabel, timestamp: new Date() },
     ]);
     setIsLoading(true);
 
@@ -69,7 +73,8 @@ export function useAgentChat({ agentApiName }: { agentApiName: string; }) {
           setError(err.message);
           setIsStreaming(false);
           setIsLoading(false);
-        }
+        },
+        fileContext,
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
