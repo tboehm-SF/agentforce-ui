@@ -379,45 +379,39 @@ app.get('/api/auth/diagnose', async (req, res) => {
   }
 
   // Test DIRECT Agent API call with Core access token (skip bootstrap entirely)
-  // The `chatbot_api` and `sfap_api` scopes may grant direct access to the Agent API.
-  const botQuery = `SELECT Id, DeveloperName, MasterLabel FROM BotDefinition WHERE IsDeleted = FALSE LIMIT 1`;
+  // Query all bots with type info, then test session creation for each
+  const botQuery = `SELECT Id, DeveloperName, MasterLabel FROM BotDefinition WHERE IsDeleted = FALSE ORDER BY MasterLabel`;
   try {
     const bqRes = await fetch(`${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(botQuery)}`, {
       headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
     });
     const bqData = await bqRes.json();
-    const firstBotId = bqData?.records?.[0]?.Id;
-    results.first_bot = { id: firstBotId, name: bqData?.records?.[0]?.MasterLabel };
-    if (firstBotId) {
-      // Try creating session with Core token directly on each host
-      for (const host of ['api.salesforce.com', 'test.api.salesforce.com', 'dev.api.salesforce.com']) {
-        const sessUrl = `https://${host}/einstein/ai-agent/v1/agents/${firstBotId}/sessions`;
-        try {
-          const sr = await fetch(sessUrl, {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-              'Content-Type': 'application/json',
-              'x-client-name': 'agentforce-ui',
-            },
-            body: JSON.stringify({
-              externalSessionKey: crypto.randomUUID(),
-              instanceConfig: { endpoint: instanceUrl },
-              streamingCapabilities: { chunkTypes: ['Text'] },
-            }),
-          });
-          const sct = sr.headers.get('content-type') || '';
-          const sbody = await sr.text();
-          results[`direct_session_${host.split('.')[0]}`] = {
-            status: sr.status,
-            contentType: sct,
-            preview: sbody.slice(0, 300),
-          };
-          // If we got a 200/201, it works — don't try other hosts
-          if (sr.ok) break;
-        } catch (e) {
-          results[`direct_session_${host.split('.')[0]}`] = { error: e.message };
-        }
+    results.all_bots = (bqData?.records || []).map(b => ({ id: b.Id, dev: b.DeveloperName, label: b.MasterLabel }));
+    // Test session creation for EACH bot on api.salesforce.com
+    results.direct_sessions = {};
+    for (const bot of (bqData?.records || []).slice(0, 5)) {
+      const sessUrl = `https://api.salesforce.com/einstein/ai-agent/v1/agents/${bot.Id}/sessions`;
+      try {
+        const sr = await fetch(sessUrl, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+            'x-client-name': 'agentforce-ui',
+          },
+          body: JSON.stringify({
+            externalSessionKey: crypto.randomUUID(),
+            instanceConfig: { endpoint: instanceUrl },
+            streamingCapabilities: { chunkTypes: ['Text'] },
+          }),
+        });
+        const sbody = await sr.text();
+        results.direct_sessions[bot.DeveloperName] = {
+          status: sr.status,
+          preview: sbody.slice(0, 250),
+        };
+      } catch (e) {
+        results.direct_sessions[bot.DeveloperName] = { error: e.message };
       }
     }
   } catch (e) {
