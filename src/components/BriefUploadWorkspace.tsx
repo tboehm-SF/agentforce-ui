@@ -484,6 +484,28 @@ export function BriefUploadWorkspace({ onBack, onLogout }: Props) {
 
 /* ── Sub-components ───────────────────────────────── */
 
+/** Render text with clickable URLs and basic **bold** formatting */
+function renderRichText(text: string) {
+  // Split on URLs (https:// or http://) and **bold** markers
+  const parts = text.split(/(https?:\/\/[^\s)]+|\*\*[^*]+\*\*)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith('http://') || part.startsWith('https://')) {
+      // Clickable link — opens in new tab
+      return (
+        <a key={i} href={part} target="_blank" rel="noopener noreferrer"
+          className="underline break-all"
+          style={{ color: '#60a5fa', textDecorationColor: '#60a5fa80' }}>
+          {part.includes('/lightning/r/Brief/') ? '🔗 Open Brief in Salesforce' : part}
+        </a>
+      );
+    }
+    if (part.startsWith('**') && part.endsWith('**')) {
+      return <strong key={i} className="font-semibold">{part.slice(2, -2)}</strong>;
+    }
+    return <span key={i}>{part}</span>;
+  });
+}
+
 function MessageBubble({ role, content, streaming }: { role: 'user' | 'agent'; content: string; streaming?: boolean }) {
   const isUser = role === 'user';
   return (
@@ -506,7 +528,7 @@ function MessageBubble({ role, content, streaming }: { role: 'user' | 'agent'; c
           border: '1px solid rgba(255,255,255,0.08)',
           color: 'rgba(255,255,255,0.85)',
         }}>
-        {content}
+        {isUser ? content : renderRichText(content)}
       </div>
     </div>
   );
