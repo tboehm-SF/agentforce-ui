@@ -25,6 +25,16 @@ app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '10mb' })); // Must be large enough for file-enriched messages
 app.set('trust proxy', 1); // Required behind Heroku's proxy for secure cookies
 
+// Health/version check — also confirms pdf-parse v2 is working
+app.get('/api/health', async (_req, res) => {
+  let pdfParseOk = false;
+  try {
+    const { PDFParse } = await import('pdf-parse');
+    pdfParseOk = typeof PDFParse === 'function';
+  } catch { /* */ }
+  res.json({ version: 'e9cc20a-pdf-v2-fix', pdfParseV2: pdfParseOk, timestamp: new Date().toISOString() });
+});
+
 // Stateless cookie-based session — encrypted+signed payload lives in the
 // browser's cookie itself, no server-side store. Survives dyno restarts,
 // scales to N dynos, requires zero infrastructure.
