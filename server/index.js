@@ -17,7 +17,7 @@ const SF_BASE_URL      = process.env.SF_BASE_URL      || 'https://storm-969c7ac7
 // OAUTH_APPROVAL_ERROR_GENERIC caused by stale OauthToken records on v1/v2.
 // PKCE-only (no client secret), scopes: api, chatbot_api, sfap_api.
 const SF_CLIENT_ID = '3MVG9FofAY6PhRtG_wK6evWxsvT2V6bdd37LMLMauFQT1qVCeaF36n8WfCHFGOmShYxG6p51ZZfsnoZuBy44D';
-const SF_API_VERSION   = process.env.SF_API_VERSION   || 'v62.0';
+const SF_API_VERSION   = process.env.SF_API_VERSION   || 'v66.0';
 const SESSION_SECRET   = process.env.SESSION_SECRET   || 'agentforce-dev-secret-change-in-prod';
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
