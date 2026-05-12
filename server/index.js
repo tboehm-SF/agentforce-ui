@@ -13,16 +13,10 @@ const isProd = process.env.NODE_ENV === 'production';
 
 // ─── Salesforce config ────────────────────────────────────────────────────────
 const SF_BASE_URL      = process.env.SF_BASE_URL      || 'https://storm-969c7ac7dcf66b.my.salesforce.com';
-// We migrated to a new Connected App (AgentforceUIv2) because the original
-// 'AgentforceUI' app accumulated stale OauthToken records that triggered
-// OAUTH_APPROVAL_ERROR_GENERIC after every Allow click. The new app has no
-// prior approvals so the OAuth flow completes cleanly.
-//
-// We hardcode the new key (instead of reading SF_CLIENT_ID env var) so that
-// the deployed Heroku instance picks it up automatically without needing the
-// config var to be manually updated. Once login is verified working, we can
-// move this back to env-driven config.
-const SF_CLIENT_ID = '3MVG9FofAY6PhRtG_wK6evWxsvdz6OsK5A9GVLGz59DlHnYFiNBmHRpyPBTSb4xTYwFd6fHFSvhrCfkLiu8l8';
+// AgentforceUIv3 Connected App — fresh app created 2026-05-12 to fix
+// OAUTH_APPROVAL_ERROR_GENERIC caused by stale OauthToken records on v1/v2.
+// PKCE-only (no client secret), scopes: api, chatbot_api, sfap_api.
+const SF_CLIENT_ID = '3MVG9FofAY6PhRtG_wK6evWxsvT2V6bdd37LMLMauFQT1qVCeaF36n8WfCHFGOmShYxG6p51ZZfsnoZuBy44D';
 const SF_API_VERSION   = process.env.SF_API_VERSION   || 'v62.0';
 const SESSION_SECRET   = process.env.SESSION_SECRET   || 'agentforce-dev-secret-change-in-prod';
 
