@@ -14,7 +14,8 @@
     "preview": "vite preview",
     "start": "NODE_ENV=production node server/index.js",
     "lint": "eslint .",
-    "heroku-postbuild": "npm run build"
+    "heroku-postbuild": "npm run build",
+    "test": "echo \"No tests configured\" && exit 0"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",

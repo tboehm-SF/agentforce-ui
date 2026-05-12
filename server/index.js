@@ -309,7 +309,7 @@ app.get('/api/auth/diagnose', async (req, res) => {
       reason: 'No active session — log in first.',
       sessionInfo,
       hint:
-        'Open https://martech-headless360-ui-6c8de6064bbd.herokuapp.com/ in the same browser tab, ' +
+        'Open https://martech-headless360-03addb2cdc06.herokuapp.com/ in the same browser tab, ' +
         'click Sign in, complete OAuth, then come back to /api/auth/diagnose.',
     });
   }
