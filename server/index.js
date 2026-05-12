@@ -1423,11 +1423,42 @@ app.post('/api/sessions/:id/messages', async (req, res) => {
 
     const reader  = sfRes.body.getReader();
     const decoder = new TextDecoder();
+    let sseBuffer = '';
+    let detectedBriefId = null;
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      res.write(decoder.decode(value, { stream: true }));
+      const chunk = decoder.decode(value, { stream: true });
+      res.write(chunk);
+
+      // Scan the SSE stream for brief creation results
+      // The Agent API sends ActionResult events with output variables
+      sseBuffer += chunk;
+      // Look for briefId in the raw stream (action results include it)
+      if (!detectedBriefId) {
+        const briefMatch = sseBuffer.match(/"briefId"\s*:\s*"([a-zA-Z0-9]{15,18})"/);
+        if (briefMatch) {
+          detectedBriefId = briefMatch[1];
+          console.log('[send message] Detected briefId in stream:', detectedBriefId);
+        }
+        // Keep buffer from growing too large — only keep last 2K
+        if (sseBuffer.length > 4000) sseBuffer = sseBuffer.slice(-2000);
+      }
     }
+
+    // If a brief was created, append a final text chunk with the clickable URL
+    if (detectedBriefId) {
+      const briefUrl = `${SF_BASE_URL}/lightning/r/Brief/${detectedBriefId}/view`;
+      const linkText = `\n\n🔗 View Brief in Salesforce: ${briefUrl}`;
+      const linkEvent = {
+        type: 'TextChunk',
+        message: { type: 'TextChunk', message: linkText },
+      };
+      res.write(`\nevent: TextChunk\ndata: ${JSON.stringify(linkEvent)}\n\n`);
+      console.log('[send message] Appended brief link:', briefUrl);
+    }
+
     res.end();
   } catch (e) {
     console.error('[send message]', e.message);
