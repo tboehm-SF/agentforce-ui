@@ -97,12 +97,9 @@ app.get('/auth/login', (req, res) => {
     client_id:              SF_CLIENT_ID,
     redirect_uri:           redirectUri,
     // sfap_api enables /agentforce/bootstrap/nameduser to issue a JWT for
-    // the Agent Runtime API. The refresh_token scope was failing
-    // OAUTH_APPROVAL_ERROR_GENERIC after Allow on this org — we keep
-    // the refresh-token plumbing in code but don't request the scope.
-    // Sessions still last 365 days via the cookie itself; the access
-    // token inside expires after ~2h and the user re-logs.
-    scope:                  'api chatbot_api sfap_api',
+    // the Agent Runtime API. refresh_token keeps the session alive when
+    // the ~2h access token expires (refresh grant returns a fresh one).
+    scope:                  'api chatbot_api sfap_api refresh_token',
     code_challenge:         codeChallenge,
     code_challenge_method:  'S256',
   });
@@ -1209,7 +1206,9 @@ const AGENT_API_HOSTS = ['api.salesforce.com', 'test.api.salesforce.com', 'dev.a
  */
 async function exchangeForAgentJwt(req, instanceUrl, accessToken) {
   async function attempt(token) {
-    const r = await fetch(`${instanceUrl}/agentforce/bootstrap/nameduser`, {
+    const url = `${instanceUrl}/agentforce/bootstrap/nameduser`;
+    console.log(`[exchangeForAgentJwt] GET ${url}  token-prefix=${token?.slice(0,12)}…`);
+    const r = await fetch(url, {
       method: 'GET',
       headers: {
         Cookie: `sid=${token}`,
@@ -1224,6 +1223,7 @@ async function exchangeForAgentJwt(req, instanceUrl, accessToken) {
       contentType.includes('text/html') ||
       body.trim().startsWith('<!DOCTYPE') ||
       body.trim().startsWith('<html');
+    console.log(`[exchangeForAgentJwt] status=${r.status} content-type=${contentType} isHtml=${isHtmlLoginRedirect} body-prefix=${body.slice(0,120)}`);
     return { r, body, contentType, isHtmlLoginRedirect };
   }
 
@@ -1234,12 +1234,14 @@ async function exchangeForAgentJwt(req, instanceUrl, accessToken) {
   if (isHtmlLoginRedirect && req?.session?.auth?.refreshToken) {
     console.log('[exchangeForAgentJwt] HTML login redirect — attempting token refresh');
     const ok = await refreshSfAccessToken(req);
+    console.log(`[exchangeForAgentJwt] refresh result=${ok}, new token prefix=${req?.session?.auth?.accessToken?.slice(0,12)}…`);
     if (ok) {
       ({ r, body, isHtmlLoginRedirect } = await attempt(req.session.auth.accessToken));
     }
   }
 
   if (isHtmlLoginRedirect) {
+    console.error('[exchangeForAgentJwt] STILL HTML after refresh — giving up. body-prefix:', body.slice(0, 300));
     throw new Error(
       'Your session expired and could not be refreshed. Sign out and sign back in.'
     );
