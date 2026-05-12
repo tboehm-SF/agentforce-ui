@@ -22,7 +22,7 @@ const SESSION_SECRET   = process.env.SESSION_SECRET   || 'agentforce-dev-secret-
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(cors({ origin: true, credentials: true }));
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // Must be large enough for file-enriched messages
 app.set('trust proxy', 1); // Required behind Heroku's proxy for secure cookies
 
 // Stateless cookie-based session — encrypted+signed payload lives in the
@@ -1002,15 +1002,24 @@ const upload = multer({
 async function extractFileContent(file) {
   const { mimetype, buffer, originalname } = file;
 
-  // PDF
+  // PDF — pdf-parse v2 uses class-based API with named export
   if (mimetype === 'application/pdf') {
-    const pdfParse = (await import('pdf-parse')).default;
-    // pdf-parse expects a Buffer — convert from Uint8Array if needed
-    const data = await pdfParse(Buffer.from(buffer));
+    const { PDFParse } = await import('pdf-parse');
+    const parser = new PDFParse({ data: Buffer.from(buffer) });
+    const result = await parser.getText();
+    const text = result.text || '';
+    // Try to get page count and metadata (v2: info.total = page count, info.info.Title = title)
+    let numpages = 0;
+    let title = originalname;
+    try {
+      const info = await parser.getInfo();
+      numpages = info.total ?? 0;
+      title = info.info?.Title || originalname;
+    } catch { /* metadata is optional */ }
     return {
-      text: data.text,
-      metadata: { pages: data.numpages, title: data.info?.Title || originalname },
-      preview: data.text.substring(0, 500),
+      text,
+      metadata: { pages: numpages, title },
+      preview: text.substring(0, 500),
     };
   }
 
@@ -1096,6 +1105,7 @@ app.post('/api/files/extract', requireAuth, upload.array('files', 5), async (req
   for (const file of req.files) {
     try {
       const extracted = await extractFileContent(file);
+      console.log('[file extract]', file.originalname, '→', (extracted.text || '').length, 'chars extracted');
       results.push({
         name: file.originalname,
         type: file.mimetype,
@@ -1343,16 +1353,27 @@ app.post('/api/sessions/:id/messages', async (req, res) => {
 
   // Build the enriched message — if the user uploaded files, prepend their
   // extracted text so the agent has full context for brief creation.
+  // The file text was already extracted server-side (pdf-parse, xlsx, etc.)
+  // and is included in fileContext[].extractedText.
   let enrichedMessage = message;
   if (Array.isArray(fileContext) && fileContext.length > 0) {
-    const filesSummary = fileContext
-      .filter(f => f.extractedText)
-      .map(f => `--- File: ${f.name} (${f.type}) ---\n${f.extractedText}`)
-      .join('\n\n');
-    if (filesSummary) {
+    const validFiles = fileContext.filter(f => f.extractedText && f.extractedText.length > 0);
+    if (validFiles.length > 0) {
+      // Cap each file at 30K chars to avoid hitting any API limits
+      const filesSummary = validFiles
+        .map(f => {
+          const text = f.extractedText.length > 30000 ? f.extractedText.substring(0, 30000) + '\n[...truncated]' : f.extractedText;
+          return `--- File: ${f.name} (${f.type}) ---\n${text}`;
+        })
+        .join('\n\n');
       enrichedMessage =
-        `The user has uploaded the following files for context:\n\n${filesSummary}\n\n` +
+        `IMPORTANT: The following file content has been extracted from uploaded documents. ` +
+        `Use this content to fulfill the user's request. Do NOT say you cannot read files — the text is right here.\n\n` +
+        `${filesSummary}\n\n` +
         `User message: ${message}`;
+      console.log('[send message] Enriched with', validFiles.length, 'file(s), total message length:', enrichedMessage.length);
+    } else {
+      console.log('[send message] fileContext had', fileContext.length, 'file(s) but none had extractedText');
     }
   }
 
