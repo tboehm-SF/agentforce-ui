@@ -378,6 +378,52 @@ app.get('/api/auth/diagnose', async (req, res) => {
     results.jwt_bootstrap_bearer = { error: e.message };
   }
 
+  // Test DIRECT Agent API call with Core access token (skip bootstrap entirely)
+  // The `chatbot_api` and `sfap_api` scopes may grant direct access to the Agent API.
+  const botQuery = `SELECT Id, DeveloperName, MasterLabel FROM BotDefinition WHERE IsDeleted = FALSE LIMIT 1`;
+  try {
+    const bqRes = await fetch(`${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(botQuery)}`, {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+    });
+    const bqData = await bqRes.json();
+    const firstBotId = bqData?.records?.[0]?.Id;
+    results.first_bot = { id: firstBotId, name: bqData?.records?.[0]?.MasterLabel };
+    if (firstBotId) {
+      // Try creating session with Core token directly on each host
+      for (const host of ['api.salesforce.com', 'test.api.salesforce.com', 'dev.api.salesforce.com']) {
+        const sessUrl = `https://${host}/einstein/ai-agent/v1/agents/${firstBotId}/sessions`;
+        try {
+          const sr = await fetch(sessUrl, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+              'x-client-name': 'agentforce-ui',
+            },
+            body: JSON.stringify({
+              externalSessionKey: crypto.randomUUID(),
+              instanceConfig: { endpoint: instanceUrl },
+              streamingCapabilities: { chunkTypes: ['Text'] },
+            }),
+          });
+          const sct = sr.headers.get('content-type') || '';
+          const sbody = await sr.text();
+          results[`direct_session_${host.split('.')[0]}`] = {
+            status: sr.status,
+            contentType: sct,
+            preview: sbody.slice(0, 300),
+          };
+          // If we got a 200/201, it works — don't try other hosts
+          if (sr.ok) break;
+        } catch (e) {
+          results[`direct_session_${host.split('.')[0]}`] = { error: e.message };
+        }
+      }
+    }
+  } catch (e) {
+    results.direct_session_test = { error: e.message };
+  }
+
   res.json({ instanceUrl, results });
 });
 
