@@ -104,11 +104,13 @@ export async function sendServerMessageStreaming(
 
         try {
           const evt = JSON.parse(raw);
-          const type = evt?.type;
+          // The Agent API nests type inside evt.message.type (not evt.type)
+          const type = evt?.message?.type ?? evt?.type;
 
           if (type === 'TextChunk') {
             // Incremental text chunk during streaming
-            const chunk = evt?.message?.text ?? evt?.text ?? '';
+            // Agent API uses evt.message.message for the text content
+            const chunk = evt?.message?.message ?? evt?.message?.text ?? evt?.text ?? '';
             if (chunk) { fullText += chunk; onChunk(chunk); }
           } else if (type === 'Inform') {
             // Complete assembled message — use as final text if streaming produced nothing
