@@ -101,8 +101,7 @@ app.get('/auth/login', (req, res) => {
     // DO NOT add refresh_token scope — this org accumulates stale
     // OauthToken records that cause OAUTH_APPROVAL_ERROR_GENERIC when
     // refresh_token is requested. Without it, the access token expires
-    // after ~2h; the exchangeForAgentJwt() function detects the HTML
-    // login redirect and surfaces a "sign back in" message.
+    // after ~2h; the user must sign in again when it expires.
     scope:                  'api chatbot_api sfap_api',
     code_challenge:         codeChallenge,
     code_challenge_method:  'S256',
@@ -827,7 +826,6 @@ app.post('/api/segments/plan', async (req, res) => {
 
   try {
     const fields = await getUnifiedIndividualFields(accessToken, instanceUrl);
-    const jwt    = await exchangeForAgentJwt(req, instanceUrl, accessToken);
 
     const fieldList = fields
       .map((f) => `  ${f.name} (${f.type}) — ${f.label}`)
@@ -848,7 +846,7 @@ app.post('/api/segments/plan', async (req, res) => {
       '}\n\n' +
       `Description: ${description}`;
 
-    const raw = await callEinsteinLlm(jwt, prompt);
+    const raw = await callEinsteinLlm(accessToken, prompt);
     // Strip markdown fences if any
     const cleaned = raw.replace(/^```(json)?\s*/i, '').replace(/```\s*$/, '').trim();
     let plan;
@@ -1246,120 +1244,32 @@ app.get('/api/content', async (req, res) => {
 });
 
 // ─── Chat API ─────────────────────────────────────────────────────────────────
-// CRITICAL: The Agent Runtime API (Agentforce v1) requires a JWT token that is
-// DIFFERENT from the standard Core OAuth access token. Flow:
-//   1. Exchange the Core access token via GET {instanceUrl}/agentforce/bootstrap/nameduser
-//      sending the access token as Cookie (sid={token}), NOT Bearer.
-//   2. Response is JSON { access_token: "<JWT>" } — that JWT is scoped for api.salesforce.com.
-//   3. Use that JWT as Bearer to POST https://api.salesforce.com/einstein/ai-agent/v1/agents/{id}/sessions.
-//   4. Session create body MUST NOT include `bypassUser: true` for user-driven flows.
-// The endpoint falls back through 3 hosts: api / test.api / dev.api (matches @salesforce/agents plugin).
-// We cache the Agent JWT per session to avoid re-exchanging on every message.
+// The Einstein AI Agent API at api.salesforce.com accepts the Core OAuth access
+// token DIRECTLY — no JWT bootstrap exchange needed. The `chatbot_api` and
+// `sfap_api` OAuth scopes grant sufficient access.
+// The endpoint falls back through 3 hosts: api / test.api / dev.api.
+// We cache agent context per session for sequenceId tracking.
 
 const sessionAgentMap = new Map();
 const AGENT_API_HOSTS = ['api.salesforce.com', 'test.api.salesforce.com', 'dev.api.salesforce.com'];
-
-/**
- * Exchange the Core OAuth access token for an Agent-API-scoped JWT.
- * Pass req so we can auto-refresh the access token if SF returns the
- * HTML login page (which happens when the cookie-auth'd session is
- * expired). The retry uses the freshly-refreshed token.
- */
-async function exchangeForAgentJwt(req, instanceUrl, accessToken) {
-  async function attempt(token) {
-    const url = `${instanceUrl}/agentforce/bootstrap/nameduser`;
-    console.log(`[exchangeForAgentJwt] GET ${url}  token-prefix=${token?.slice(0,12)}…`);
-
-    // Try Cookie-based auth first (documented approach)
-    let r = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Cookie: `sid=${token}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      redirect: 'manual',
-    });
-    let contentType = r.headers.get('content-type') || '';
-    let body        = await r.text();
-    let isHtmlLoginRedirect =
-      contentType.includes('text/html') ||
-      body.trim().startsWith('<!DOCTYPE') ||
-      body.trim().startsWith('<html');
-
-    // If Cookie auth failed, try Bearer token (works with some PKCE-issued tokens)
-    if (isHtmlLoginRedirect) {
-      console.log('[exchangeForAgentJwt] Cookie auth returned HTML, trying Bearer token…');
-      r = await fetch(url, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        redirect: 'manual',
-      });
-      contentType = r.headers.get('content-type') || '';
-      body = await r.text();
-      isHtmlLoginRedirect =
-        contentType.includes('text/html') ||
-        body.trim().startsWith('<!DOCTYPE') ||
-        body.trim().startsWith('<html');
-    }
-
-    console.log(`[exchangeForAgentJwt] status=${r.status} content-type=${contentType} isHtml=${isHtmlLoginRedirect} body-prefix=${body.slice(0,120)}`);
-    return { r, body, contentType, isHtmlLoginRedirect };
-  }
-
-  let { r, body, isHtmlLoginRedirect } = await attempt(accessToken);
-
-  // If the bootstrap returned the SF login page, the access token is stale.
-  // Try a refresh-token grant and retry the bootstrap.
-  if (isHtmlLoginRedirect && req?.session?.auth?.refreshToken) {
-    console.log('[exchangeForAgentJwt] HTML login redirect — attempting token refresh');
-    const ok = await refreshSfAccessToken(req);
-    console.log(`[exchangeForAgentJwt] refresh result=${ok}, new token prefix=${req?.session?.auth?.accessToken?.slice(0,12)}…`);
-    if (ok) {
-      ({ r, body, isHtmlLoginRedirect } = await attempt(req.session.auth.accessToken));
-    }
-  }
-
-  if (isHtmlLoginRedirect) {
-    console.error('[exchangeForAgentJwt] STILL HTML after refresh — giving up. body-prefix:', body.slice(0, 300));
-    throw new Error(
-      'Your session expired and could not be refreshed. Sign out and sign back in.'
-    );
-  }
-
-  if (!r.ok) {
-    throw new Error(
-      `Agent JWT exchange failed (HTTP ${r.status}). ` +
-      `Body: ${body.slice(0, 200)}`
-    );
-  }
-
-  let data;
-  try {
-    data = JSON.parse(body);
-  } catch {
-    throw new Error(`Agent JWT exchange returned non-JSON body: ${body.slice(0, 200)}`);
-  }
-  if (!data.access_token) {
-    throw new Error(`JWT exchange returned no access_token: ${JSON.stringify(data).slice(0, 200)}`);
-  }
-  return data.access_token;
-}
 
 /** Fetch a URL against api.salesforce.com with automatic endpoint fallback (prod → test → dev). */
 async function fetchAgentApi(path, options) {
   let lastErr;
   for (const host of AGENT_API_HOSTS) {
     const url = `https://${host}${path}`;
+    console.log(`[fetchAgentApi] ${options?.method || 'GET'} ${url}`);
     const r = await fetch(url, options);
     if (r.status !== 404) return r;
+    console.log(`[fetchAgentApi] 404 on ${host}, trying next…`);
     lastErr = r;
   }
   return lastErr; // all 404 — return the last one so caller gets a consistent response object
+}
+
+/** Get the current Core access token from the session (refreshes if available). */
+function getAccessToken(req) {
+  return req.session.auth?.accessToken;
 }
 
 app.post('/api/agents/:agentId/sessions', async (req, res) => {
@@ -1374,14 +1284,13 @@ app.post('/api/agents/:agentId/sessions', async (req, res) => {
   }
 
   try {
-    // 1. Exchange Core token → Agent-API JWT (auto-refreshes if stale)
-    const agentJwt = await exchangeForAgentJwt(req, instanceUrl, accessToken);
+    console.log(`[create session] agentId=${agentId} token-prefix=${accessToken?.slice(0,12)}…`);
 
-    // 2. Create session on api.salesforce.com
+    // Create session on api.salesforce.com using Core access token directly
     const sfRes = await fetchAgentApi(`/einstein/ai-agent/v1/agents/${agentId}/sessions`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${agentJwt}`,
+        Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
         'x-client-name': 'agentforce-ui',
       },
@@ -1407,13 +1316,10 @@ app.post('/api/agents/:agentId/sessions', async (req, res) => {
     }
 
     const data = await sfRes.json();
-    // Cache JWT + agent context so we don't re-exchange on every message
+    // Cache agent context so we can track sequenceId per session
     sessionAgentMap.set(data.sessionId, {
       agentId,
       instanceUrl,
-      accessToken,
-      agentJwt,
-      jwtAcquiredAt: Date.now(),
       sequenceId: 0,
     });
     // Include the greeting message so the UI can show it immediately
@@ -1427,19 +1333,11 @@ app.post('/api/agents/:agentId/sessions', async (req, res) => {
   }
 });
 
-/** Refresh the JWT if it's older than 50 minutes (they expire at 60). */
-async function getFreshJwt(req, sessionInfo) {
-  const ageMin = (Date.now() - sessionInfo.jwtAcquiredAt) / 60000;
-  if (ageMin < 50) return sessionInfo.agentJwt;
-  sessionInfo.agentJwt = await exchangeForAgentJwt(req, sessionInfo.instanceUrl, sessionInfo.accessToken);
-  sessionInfo.jwtAcquiredAt = Date.now();
-  return sessionInfo.agentJwt;
-}
-
 app.post('/api/sessions/:id/messages', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
   const { id }      = req.params;
   const { message, fileContext } = req.body;
+  const accessToken = getAccessToken(req);
   const sessionInfo = sessionAgentMap.get(id);
   if (!sessionInfo) return res.status(404).json({ error: 'Session not found or expired. Start a new chat.' });
 
@@ -1462,11 +1360,10 @@ app.post('/api/sessions/:id/messages', async (req, res) => {
   const { sequenceId } = sessionInfo;
 
   try {
-    const jwt = await getFreshJwt(req, sessionInfo);
     const sfRes = await fetchAgentApi(`/einstein/ai-agent/v1/sessions/${id}/messages/stream`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${jwt}`,
+        Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
         'x-client-name': 'agentforce-ui',
@@ -1510,14 +1407,14 @@ app.post('/api/sessions/:id/messages', async (req, res) => {
 
 app.delete('/api/sessions/:id', async (req, res) => {
   const { id } = req.params;
+  const accessToken = getAccessToken(req);
   const sessionInfo = sessionAgentMap.get(id);
   if (!sessionInfo) return res.json({ ok: true });
   try {
-    const jwt = await getFreshJwt(req, sessionInfo);
     await fetchAgentApi(`/einstein/ai-agent/v1/sessions/${id}`, {
       method: 'DELETE',
       headers: {
-        Authorization: `Bearer ${jwt}`,
+        Authorization: `Bearer ${accessToken}`,
         'x-session-end-reason': 'UserRequest',
         'x-client-name': 'agentforce-ui',
       },
