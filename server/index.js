@@ -343,22 +343,39 @@ app.get('/api/auth/diagnose', async (req, res) => {
   await probe('segments_list', `${instanceUrl}/services/data/${SF_API_VERSION}/ssot/segments?offset=0&batchSize=1`);
   await probe('campaign_query', `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent('SELECT Id FROM Campaign LIMIT 1')}`);
   await probe('cms_query', `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent("SELECT Id FROM ManagedContent WHERE AuthoredManagedContentSpaceId='" + (process.env.CMS_WORKSPACE_ID || '0Zug7000000GnsoCAC') + "' LIMIT 1")}`);
-  // Test JWT exchange (uses Cookie auth, NOT Bearer)
+  // Test JWT exchange — Cookie auth
   try {
     const r = await fetch(`${instanceUrl}/agentforce/bootstrap/nameduser`, {
-      headers: { Cookie: `sid=${accessToken}` },
+      headers: { Cookie: `sid=${accessToken}`, Accept: 'application/json' },
       redirect: 'manual',
     });
     const ct = r.headers.get('content-type') || '';
     const text = await r.text();
-    results.jwt_bootstrap = {
+    results.jwt_bootstrap_cookie = {
       status: r.status,
       contentType: ct,
       isJson: ct.includes('application/json'),
-      preview: text.slice(0, 100),
+      preview: text.slice(0, 150),
     };
   } catch (e) {
-    results.jwt_bootstrap = { error: e.message };
+    results.jwt_bootstrap_cookie = { error: e.message };
+  }
+  // Test JWT exchange — Bearer auth
+  try {
+    const r = await fetch(`${instanceUrl}/agentforce/bootstrap/nameduser`, {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+      redirect: 'manual',
+    });
+    const ct = r.headers.get('content-type') || '';
+    const text = await r.text();
+    results.jwt_bootstrap_bearer = {
+      status: r.status,
+      contentType: ct,
+      isJson: ct.includes('application/json'),
+      preview: text.slice(0, 150),
+    };
+  } catch (e) {
+    results.jwt_bootstrap_bearer = { error: e.message };
   }
 
   res.json({ instanceUrl, results });
@@ -1212,7 +1229,9 @@ async function exchangeForAgentJwt(req, instanceUrl, accessToken) {
   async function attempt(token) {
     const url = `${instanceUrl}/agentforce/bootstrap/nameduser`;
     console.log(`[exchangeForAgentJwt] GET ${url}  token-prefix=${token?.slice(0,12)}…`);
-    const r = await fetch(url, {
+
+    // Try Cookie-based auth first (documented approach)
+    let r = await fetch(url, {
       method: 'GET',
       headers: {
         Cookie: `sid=${token}`,
@@ -1221,12 +1240,33 @@ async function exchangeForAgentJwt(req, instanceUrl, accessToken) {
       },
       redirect: 'manual',
     });
-    const contentType = r.headers.get('content-type') || '';
-    const body        = await r.text();
-    const isHtmlLoginRedirect =
+    let contentType = r.headers.get('content-type') || '';
+    let body        = await r.text();
+    let isHtmlLoginRedirect =
       contentType.includes('text/html') ||
       body.trim().startsWith('<!DOCTYPE') ||
       body.trim().startsWith('<html');
+
+    // If Cookie auth failed, try Bearer token (works with some PKCE-issued tokens)
+    if (isHtmlLoginRedirect) {
+      console.log('[exchangeForAgentJwt] Cookie auth returned HTML, trying Bearer token…');
+      r = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        redirect: 'manual',
+      });
+      contentType = r.headers.get('content-type') || '';
+      body = await r.text();
+      isHtmlLoginRedirect =
+        contentType.includes('text/html') ||
+        body.trim().startsWith('<!DOCTYPE') ||
+        body.trim().startsWith('<html');
+    }
+
     console.log(`[exchangeForAgentJwt] status=${r.status} content-type=${contentType} isHtml=${isHtmlLoginRedirect} body-prefix=${body.slice(0,120)}`);
     return { r, body, contentType, isHtmlLoginRedirect };
   }
