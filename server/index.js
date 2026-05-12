@@ -32,7 +32,7 @@ app.get('/api/health', async (_req, res) => {
     const { PDFParse } = await import('pdf-parse');
     pdfParseOk = typeof PDFParse === 'function';
   } catch { /* */ }
-  res.json({ version: 'e9cc20a-pdf-v2-fix', pdfParseV2: pdfParseOk, timestamp: new Date().toISOString() });
+  res.json({ version: 'a77486b-brief-url-inject', pdfParseV2: pdfParseOk, timestamp: new Date().toISOString() });
 });
 
 // Stateless cookie-based session — encrypted+signed payload lives in the
