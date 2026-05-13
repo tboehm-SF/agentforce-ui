@@ -51,7 +51,12 @@ export function AgentPicker({ auth, onConfirm, onLogout, onBack }: Props) {
         // Pre-select all agents
         setSelected(new Set(enriched.map((a) => a.id)));
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes('401') || msg.includes('INVALID_JWT') || msg.includes('INVALID_AUTH')) {
+          setError('SESSION_EXPIRED');
+        } else {
+          setError(msg);
+        }
       } finally {
         setLoading(false);
       }
@@ -146,8 +151,27 @@ export function AgentPicker({ auth, onConfirm, onLogout, onBack }: Props) {
           </div>
         )}
 
+        {/* ── Session Expired ────────────────────── */}
+        {error === 'SESSION_EXPIRED' && (
+          <div className="flex-1 flex flex-col items-center justify-center gap-4">
+            <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-2xl"
+              style={{ background: 'rgba(27,150,255,0.12)', border: '1px solid rgba(27,150,255,0.3)' }}>
+              🔑
+            </div>
+            <div className="text-center">
+              <p className="text-white/80 text-sm font-semibold mb-1">Session Expired</p>
+              <p className="text-white/35 text-xs max-w-xs">Your Salesforce session has expired. Please sign in again.</p>
+            </div>
+            <button onClick={onLogout}
+              className="text-sm px-6 py-2.5 rounded-xl font-semibold text-white transition-all"
+              style={{ background: 'linear-gradient(135deg, #1b96ff, #0176d3)', boxShadow: '0 4px 16px rgba(27,150,255,0.3)' }}>
+              Sign in again →
+            </button>
+          </div>
+        )}
+
         {/* ── Error ───────────────────────────────── */}
-        {error && (
+        {error && error !== 'SESSION_EXPIRED' && (
           <div className="glass rounded-2xl p-6 text-center">
             <div className="text-2xl mb-3">⚠️</div>
             <p className="text-white/60 text-sm mb-1">Couldn't load agents</p>

@@ -82,7 +82,15 @@ export function BriefUploadWorkspace({ onBack, onLogout }: Props) {
           );
         }
       })
-      .catch((e) => setAgentError(`Failed to load agents: ${e.message}`));
+      .catch((e) => {
+        const msg = e.message || String(e);
+        // If it's an auth error, surface a re-login message
+        if (msg.includes('401') || msg.includes('INVALID_JWT') || msg.includes('INVALID_AUTH')) {
+          setAgentError('SESSION_EXPIRED');
+        } else {
+          setAgentError(`Failed to load agents: ${msg}`);
+        }
+      });
   }, []);
 
   const {
@@ -419,8 +427,27 @@ export function BriefUploadWorkspace({ onBack, onLogout }: Props) {
 
           {/* Messages */}
           <div className="relative flex-1 overflow-y-auto px-6 py-5 space-y-4">
+            {/* Session expired — prompt re-login */}
+            {agentError === 'SESSION_EXPIRED' && (
+              <div className="h-full flex flex-col items-center justify-center text-center py-12 panel-animate">
+                <div className="w-20 h-20 rounded-2xl flex items-center justify-center text-4xl mb-6"
+                  style={{ background: 'rgba(27,150,255,0.12)', border: '1px solid rgba(27,150,255,0.3)' }}>
+                  🔑
+                </div>
+                <h2 className="text-lg font-bold text-white mb-2">Session Expired</h2>
+                <p className="text-sm text-white/45 max-w-sm leading-relaxed">
+                  Your Salesforce session has expired. Please sign in again to continue.
+                </p>
+                <button onClick={onLogout}
+                  className="mt-4 text-sm px-6 py-2.5 rounded-xl font-semibold text-white transition-all"
+                  style={{ background: 'linear-gradient(135deg, #1b96ff, #0176d3)', boxShadow: '0 4px 16px rgba(27,150,255,0.3)' }}>
+                  Sign in again →
+                </button>
+              </div>
+            )}
+
             {/* Agent not found on this org */}
-            {agentError && (
+            {agentError && agentError !== 'SESSION_EXPIRED' && (
               <div className="h-full flex flex-col items-center justify-center text-center py-12 panel-animate">
                 <div className="w-20 h-20 rounded-2xl flex items-center justify-center text-4xl mb-6"
                   style={{ background: 'rgba(220,90,20,0.12)', border: '1px solid rgba(220,90,20,0.3)' }}>
