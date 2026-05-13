@@ -25,7 +25,7 @@ const MODES: {
     accent: '#1b96ff',
     bg: 'rgba(1,118,211,0.12)',
     glow: 'rgba(27,150,255,0.25)',
-    tags: ['16 agents', 'Real-time chat', 'SSE streaming'],
+    tags: ['External agents', 'Real-time chat', 'SSE streaming'],
   },
   {
     id: 'segments',

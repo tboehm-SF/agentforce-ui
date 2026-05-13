@@ -480,26 +480,29 @@ app.get('/api/auth/diagnose', async (req, res) => {
 });
 
 // Step 4: Fetch org agents using the session token — include Id (record ID needed for Agent API)
-// CRITICAL: Only AgentforceServiceAgent types work with /einstein/ai-agent/v1/.
-// Legacy EinsteinServiceAgent / MyDomainChatbot / ExternalCopilot return HTML 404s.
+// Only ExternalCopilot agents are accessible via the Agent Runtime API (/einstein/ai-agent/v1/).
+// InternalCopilot, Bot, and other types cannot be used from external headless apps.
 app.get('/api/auth/agents', async (req, res) => {
   if (!req.session.auth) return res.status(401).json({ error: 'Not authenticated' });
 
   try {
     const { instanceUrl } = req.session.auth;
-    const queryWithType =
+    // Primary query: only ExternalCopilot agents (the only type the Agent API supports)
+    const queryExternal =
       "SELECT Id, DeveloperName, MasterLabel, Type FROM BotDefinition " +
+      "WHERE Type = 'ExternalCopilot' AND IsDeleted = FALSE ORDER BY MasterLabel";
+    // Fallback: if Type field isn't available, return all and let the client handle it
+    const queryAll =
+      "SELECT Id, DeveloperName, MasterLabel FROM BotDefinition " +
       "WHERE IsDeleted = FALSE ORDER BY MasterLabel";
-    const queryNoType =
-      "SELECT Id, DeveloperName, MasterLabel FROM BotDefinition ORDER BY MasterLabel";
 
     async function runQuery(q) {
       const url = `${instanceUrl}/services/data/${SF_API_VERSION}/query?q=${encodeURIComponent(q)}`;
       return sfFetch(req, url);
     }
 
-    let sfRes = await runQuery(queryWithType);
-    if (!sfRes.ok) sfRes = await runQuery(queryNoType);
+    let sfRes = await runQuery(queryExternal);
+    if (!sfRes.ok) sfRes = await runQuery(queryAll);
 
     if (!sfRes.ok) {
       const errText = await sfRes.text();
